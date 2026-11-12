@@ -447,6 +447,32 @@ tests/              the unit tests
 configs/default.yaml
 ```
 
+## Checking the corpus
+
+The scratchpads are the training signal, so a derivation that does not add up
+is worse than no training at all. `make check-arithmetic` walks every family,
+finds every line that states an expression and a result, evaluates the
+expression with sympy and compares it with the result it claims:
+
+```
+$ make check-arithmetic
+  ...
+checked 3400 problems across 17 families
+every printed expression evaluates to the value it claims
+```
+
+It caught a real one. The 3x3 cofactor expansion printed the signed minors
+and left out the matrix element, so
+
+```
+STEP 1 expand along the first row: det(A) = (+1)*(-4) + (-1)*(-10) + (+1)*(2) = 4
+```
+
+evaluated to 8. The ground truth was right, so no test that compared the
+answer with the truth would ever have noticed. It is fixed, and
+`tests/test_scratchpad.py` now runs the check over every family on every
+test run, along with a check that the step numbers are contiguous.
+
 ## The tests
 
 ```bash

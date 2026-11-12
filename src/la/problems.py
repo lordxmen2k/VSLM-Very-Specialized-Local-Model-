@@ -276,17 +276,32 @@ def gen_determinant(rng: random.Random) -> Problem | None:
     stem = fmt_matrix(A)
     q = paraphrase("determinant", stem, rng)
     steps = [f"GIVEN: A = {fmt_matrix(A)}"]
+    step_no = 0
+
+    def step(text: str) -> str:
+        """Numbered step. The number follows on from the last one used, so
+        the verification step is always the step after the last real step
+        and the scratchpad never jumps from STEP 1 to STEP 4."""
+        nonlocal step_no
+        step_no += 1
+        return f"STEP {step_no} {text}"
+
     if n == 2:
-        steps.append(f"STEP 1 det(A) = {fmt_scalar(A[0, 0])}*{fmt_scalar(A[1, 1])} "
-                     f"- {fmt_scalar(A[0, 1])}*{fmt_scalar(A[1, 0])} = {fmt_scalar(det)}")
+        steps.append(step(f"det(A) = {fmt_scalar(A[0, 0])}*{fmt_scalar(A[1, 1])} "
+                          f"- {fmt_scalar(A[0, 1])}*{fmt_scalar(A[1, 0])} = {fmt_scalar(det)}"))
     elif n == 3:
+        # cofactor expansion along the first row:
+        #   det(A) = sum_j a_1j * (-1)^(1+j) * M_1j
+        # the element a_1j has to be in the printed expression, or the
+        # expression does not evaluate to the determinant
         cofactors = []
         for j in range(3):
             minor = A.minor_submatrix(0, j)
             sign = 1 if j % 2 == 0 else -1
-            cofactors.append(f"({sign:+d})*({fmt_scalar(sp.simplify(minor.det()))})")
-        steps.append("STEP 1 expand along the first row: det(A) = "
-                     + " + ".join(cofactors) + f" = {fmt_scalar(det)}")
+            coef = sp.simplify(A[0, j] * sign)
+            cofactors.append(f"({fmt_scalar(coef)})*({fmt_scalar(sp.simplify(minor.det()))})")
+        steps.append(step("expand along the first row: det(A) = "
+                          + " + ".join(cofactors) + f" = {fmt_scalar(det)}"))
     else:
         # elimination by row addition: the determinant is unchanged, and the
         # only sign is the number of row interchanges
@@ -294,8 +309,8 @@ def gen_determinant(rng: random.Random) -> Problem | None:
         diag = [sp.nsimplify(U[i, i]) for i in range(n)]
         if any(d == 0 for d in diag):
             return None
-        steps.append("STEP 1 eliminate below each pivot by adding a multiple "
-                     "of one row to another, which leaves the determinant alone")
+        steps.append(step("eliminate below each pivot by adding a multiple "
+                          "of one row to another, which leaves the determinant alone"))
         for r, factor, col in trace[:6]:
             steps.append(f"  row {r + 1} -= ({fmt_scalar(factor)}) * row {col + 1}")
         if len(trace) > 6:
@@ -304,13 +319,13 @@ def gen_determinant(rng: random.Random) -> Problem | None:
         factors = [fmt_scalar(d) for d in diag]
         if swaps % 2:
             factors[0] = "-" + factors[0]
-        steps.append(f"STEP 2 the upper triangular form has diagonal "
-                     + ", ".join(fmt_scalar(d) for d in diag)
-                     + (f", with {swaps} row interchange"
-                        f"{'s' if swaps != 1 else ''}" if swaps else ""))
-        steps.append(f"STEP 3 det(A) = " + " * ".join(factors)
-                     + f" = {fmt_scalar(det)}")
-    steps.append(f"STEP 4 VERIFY the determinant of the same matrix is {fmt_scalar(det)}. OK")
+        steps.append(step("the upper triangular form has diagonal "
+                          + ", ".join(fmt_scalar(d) for d in diag)
+                          + (f", with {swaps} row interchange"
+                             f"{'s' if swaps != 1 else ''}" if swaps else "")))
+        steps.append(step("det(A) = " + " * ".join(factors)
+                          + f" = {fmt_scalar(det)}"))
+    steps.append(step(f"VERIFY the determinant of the same matrix is {fmt_scalar(det)}. OK"))
     scratch = "\n".join(steps)
     spec = {"kind": "matrix_heatmap",
             "data": {"matrix": _mat(A)},
@@ -431,8 +446,12 @@ def gen_orthonormal_basis(rng: random.Random) -> Problem | None:
     steps = ["GIVEN: v1 = " + fmt_matrix(vecs[0])
              + (", v2 = " + fmt_matrix(vecs[1]) if k > 1 else "")]
     for i in range(k):
-        steps.append(f"STEP {i+1} w{i+1} = v{i+1} - sum over earlier vectors gives "
-                     f"w{i+1} = {fmt_matrix(Q[:, i])}")
+        if i == 0:
+            steps.append(f"STEP {i+1} w1 = v1 (there is nothing to subtract yet) "
+                         f"gives w1 = {fmt_matrix(Q[:, i])}")
+        else:
+            steps.append(f"STEP {i+1} w{i+1} = v{i+1} - sum over earlier vectors gives "
+                         f"w{i+1} = {fmt_matrix(Q[:, i])}")
         steps.append(f"STEP {i+1}b normalise: ||w{i+1}|| = "
                      f"{fmt_scalar(sp.simplify(Q[:, i].dot(Q[:, i])))} so the "
                      f"unit vector is {fmt_matrix(Q[:, i])}")

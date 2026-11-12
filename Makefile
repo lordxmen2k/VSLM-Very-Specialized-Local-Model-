@@ -95,6 +95,10 @@ chat:
 test:
 	$(PYTHON) -m unittest discover -s tests -v
 
+# check that every printed derivation evaluates to its own answer
+check-arithmetic:
+	$(PYTHON) -m la.check_arithmetic --n 200
+
 clean:
 	rm -rf runs/ outputs/ .pytest_cache/
 	find . -name '__pycache__' -type d -exec rm -rf {} +
