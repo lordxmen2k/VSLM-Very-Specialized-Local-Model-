@@ -172,9 +172,9 @@ The log line reports the time per step, the peak VRAM, and the time spent
 waiting for the data loader, so a slow GPU and a starved loader are
 distinguishable.
 
-The corpus build is about 9 problems a second
-on one core, so 20,000 problems is about 35 minutes on one core or about 10
-minutes on four.
+The corpus build measures about 594 problems a second on four workers — the
+20,000-problem training set takes about 34 seconds, and the 40 sample
+figures add about half a minute at 0.77 s each.
 
 ---
 
