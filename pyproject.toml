@@ -1,0 +1,51 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vslm"
+version = "0.1.0"
+description = "Very Specialised Local Model - a Qwen3-1.7B fine-tune for linear algebra, trained on one 12 GB GPU"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+authors = [{ name = "lordxmen2k" }]
+keywords = ["llm", "linear-algebra", "qlora", "sympy", "local-model"]
+
+# The data pipeline needs only numpy, sympy and matplotlib. The training
+# stack is heavier and is listed separately so that the corpus can be
+# rebuilt without pulling in torch.
+dependencies = [
+    "numpy>=1.24",
+    "sympy>=1.11",
+    "matplotlib>=3.7",
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+train = [
+    "torch>=2.3",
+    "transformers>=4.45",
+    "peft>=0.12",
+    "bitsandbytes>=0.43",
+    "accelerate>=0.33",
+]
+dev = [
+    "pytest>=8.0",
+]
+
+[project.scripts]
+vslm-build-dataset = "la.build_dataset:main"
+vslm-train = "la.train:main"
+vslm-evaluate = "la.evaluate:main"
+vslm-chat = "la.chat:main"
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]

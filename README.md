@@ -1,0 +1,272 @@
+# VSLM — a linear algebra model that runs on one 12 GB card
+
+**Very Specialised Local Model.** A fine-tune of `Qwen3-1.7B-Base` that answers
+linear algebra questions, shows its working, and draws the figure.
+
+Everything the model was trained on is generated from scratch by this
+repository. There is no scraped corpus, no borrowed dataset and no third-party
+model in the loop: sympy computes every answer, and the training data is
+therefore correct by construction. The corpus is reproducible from a seed.
+
+```bash
+git clone https://github.com/lordxmen2k/VSLM-Very-Specialized-Local-Model-
+cd VSLM-Very-Specialized-Local-Model-
+pip install -e ".[train,dev]"
+
+make data      # build the corpus            (~30 min, 4 workers)
+make train     # QLoRA fine-tune            (~30 min for 2 epochs)
+make eval      # score it on the held-out set
+make chat      # ask it something
+```
+
+---
+
+## What it does
+
+```
+### Problem
+For v = \begin{pmatrix} 3 \\ 5 \end{pmatrix} and w = \begin{pmatrix} 3 \\ 1 \end{pmatrix},
+compute the orthogonal projection of the first vector onto the second, and the residual.
+
+### Scratchpad
+GIVEN: v = \begin{pmatrix} 3 \\ 5 \end{pmatrix}, w = \begin{pmatrix} 3 \\ 1 \end{pmatrix}
+STEP 1 <v, w> = 14 and <w, w> = 10
+STEP 2 proj = (<v,w> / <w,w>) w = \begin{pmatrix} \frac{21}{5} \\ \frac{7}{5} \end{pmatrix}
+STEP 3 residual = v - proj = \begin{pmatrix} \frac{-6}{5} \\ \frac{18}{5} \end{pmatrix}
+STEP 4 VERIFY proj + residual = v and proj is parallel to w. OK
+
+### Answer
+p = \begin{pmatrix} \frac{21}{5} \\ \frac{7}{5} \end{pmatrix}, r = \begin{pmatrix} \frac{-6}{5} \\ \frac{18}{5} \end{pmatrix}
+
+### Plot
+{"kind":"projection","data":{...},"labels":{...},"annotate":["orthogonal projection"]}
+```
+
+Three things follow from that shape.
+
+**The scratchpad is computed, not written.** Every step in it is what sympy
+actually did, and every answer ends with a VERIFY line that re-checks the
+result by substitution. The model learns the habit of computing and then
+checking, which is the habit that makes its arithmetic checkable.
+
+**The model never draws.** It emits a small declarative JSON object describing
+the figure, and a deterministic renderer turns that into a PNG. A drawing
+instruction is a far smaller competence to learn than a drawing, and it means
+the numbers in the picture are the numbers in the answer.
+
+**The answer is checked, not trusted.** `la.answer` defines a restricted LaTeX
+grammar for answers and parses it back into sympy. The evaluation harness
+compares the model's parse against the ground truth. Nothing about the
+evaluation depends on the model being right about itself.
+
+---
+
+## The twelve problem families
+
+Every family is generated, verified by sympy, and paired with a figure.
+
+| Family | What it asks | Figure |
+|---|---|---|
+| `determinant` | det of an n×n integer matrix | matrix heatmap |
+| `solve_system` | solve Ax = b uniquely | A and its reduced row echelon form |
+| `eigenvalues` | the spectrum, real or complex | eigenvalues on the complex plane |
+| `diagonalize` | the diagonal form D in A = P D P⁻¹ | spectrum of D |
+| `orthonormal_basis` | Gram–Schmidt to an orthonormal set | the basis in 2D or 3D |
+| `projection` | projection of v onto span(w), and the residual | vector, projection, residual |
+| `least_squares` | the least-squares solution of an overdetermined system | data and fitted line |
+| `lu_factor` | L and U with LU = A | the upper triangular factor |
+| `svd` | the singular values | singular value spectrum |
+| `condition_number` | cond₂(A) | matrix heatmap |
+| `rank_nullspace` | rank and nullity | a basis of the null space |
+| `linear_transform` | T(v) and the image of the unit square | the unit square and its image |
+
+---
+
+## Why the corpus is different from a normal one
+
+Three deliberate choices, each of which matters more than it looks.
+
+**1. The ground truth is mechanical.** There is no human-written answer
+anywhere in this repository. sympy computes the answer, the scratchpad and the
+figure values, and the training data inherits them. The usual failure of a
+domain corpus — the answer quietly drifting from the question — cannot happen.
+
+**2. Every problem is augmented.** A model trained on one phrasing of one
+shape of problem learns to recognise that shape. So each problem is asked
+several ways (three to five templates per family), and matrices are relabelled:
+rows permuted, or put through a similarity transform, which preserves the
+spectrum exactly. The answer is recomputed from the matrix as it appears in
+the question, so augmentation can never introduce an inconsistency.
+
+**3. The scratchpad ends with a check.** Every generated derivation closes with
+a VERIFY line. The model learns to state the check, which is the one thing that
+distinguishes a model that can be audited from one that merely sounds certain.
+
+---
+
+## Why it fits on a 12 GB card
+
+`Qwen3-1.7B-Base` is 1.72B parameters: 28 layers, hidden 2048, 16 query
+heads, 8 KV heads, head dimension 128, tied embeddings, 32,768-token native
+context.
+
+| | |
+|---|---|
+| Weights, bf16 | 3.44 GB |
+| Weights, NF4 (QLoRA) | ~0.9 GB |
+| KV cache per token | 112 KB (bf16) · 56 KB (q8_0) |
+| KV cache at 8K context | 0.88 GB (bf16) · 0.44 GB (q8_0) |
+
+Inference is comfortable. **Q4_K_M weights (1.1 GB) plus an 8K context plus
+runtime overhead is about 2.2 GB**, and at 32K context in bf16 it is about
+7.6 GB. A 131K context fits only if the KV cache is quantised, and only just.
+
+Training is the part that needs care, and QLoRA is what makes it work:
+
+| Method | VRAM | Host RAM | Fits 12 GB? |
+|---|---|---|---|
+| Full fine-tune, AdamW | 27.5 GB | — | no |
+| Full fine-tune, 8-bit Adam | 10.3 GB | ~6 GB | tight; no room for activations |
+| Full fine-tune, offloaded optimiser | 6.9 GB | ~21 GB | yes |
+| **LoRA, bf16 base** | **~4 GB** | ~2 GB | yes, comfortable |
+| **QLoRA, NF4 base** | **~2 GB** | ~2 GB | yes, very comfortable |
+
+The default is QLoRA: 4-bit NF4 with double quantisation, rank 32, alpha 64,
+gradient checkpointing, sequence length 2048, batch size 1 with 16 gradient
+accumulation steps, `paged_adamw_8bit`, bf16 compute, lr 1e-4 cosine with 3 %
+warmup, two epochs.
+
+**Expected cost.** About 1,250 optimiser steps per epoch over 20,000 examples,
+and roughly 0.7 s per step on an RTX 4070 — so about 15 minutes per epoch, or
+30 minutes for the default two. The corpus build is about 9 problems a second
+on one core, so 20,000 problems is about 35 minutes on one core or about 10
+minutes on four.
+
+---
+
+## The commands
+
+### Build the corpus
+
+```bash
+make data                       # 20,000 train + 200 held-out
+# or
+python -m la.build_dataset --n-train 20000 --n-test 200 --seed 7 --out data --workers 4
+```
+
+Writes `data/train.jsonl`, `data/test.jsonl` and a sample of rendered figures
+in `data/figures/`. The build is deterministic: the same seed gives the same
+corpus, whatever the worker count.
+
+### Render a sample of figures first
+
+```bash
+make sample
+```
+
+Cheap sanity check: 240 problems and 24 rendered figures, about a minute. Look
+at `data-sample/figures/` before spending an hour on the full corpus.
+
+### Train
+
+```bash
+make train
+# or
+python -m la.train --data data/train.jsonl --out runs/vslm --epochs 2 --lr 1e-4
+```
+
+Useful flags: `--max-steps 50` for a smoke test, `--limit 2000` for a short
+run, `--max-seq-len 4096` if you have the memory and want longer problems,
+`--no-4bit` for a full-precision run (needs about 24 GB).
+
+### Evaluate
+
+```bash
+make eval
+```
+
+Prints the four numbers that matter, and the per-family and per-difficulty
+breakdown:
+
+```
+  answer correct        142/200  (71.0%)
+  plot kind correct     168/200  (84.0%)
+  plot values correct   121/200  (60.5%)
+  abstained              14/200  (7.0%)
+```
+
+**The abstention rate is not a footnote.** A model that always answers has a
+100 % rate on the problems it guessed and 0 % on the ones it did not, and the
+headline number cannot tell you which is which. A model that abstains correctly
+on a fifth of the problems is more useful than one that confabulates the same
+fraction.
+
+### Ask it something
+
+```bash
+python -m la.chat --adapter runs/vslm
+python -m la.chat --adapter runs/vslm --question "What is the determinant of [[2,1],[1,2]]?"
+```
+
+The front end parses the answer and the plot spec, and tells you if either
+failed to check out.
+
+---
+
+## Layout
+
+```
+src/la/
+  problems.py      the twelve generators; sympy computes every answer
+  augment.py       question templates and matrix relabelling
+  answer.py        the answer grammar: printer, parser, comparator
+  schema.py        the plot-spec schema, validator and feature extraction
+  render.py        plot spec -> PNG, ten figure kinds
+  build_dataset.py the corpus builder
+  train.py         the QLoRA training loop
+  evaluate.py      the evaluation harness
+  chat.py          the front end
+  inference.py     loading, generation, parsing a completion
+tests/              the unit tests
+configs/default.yaml
+```
+
+## The tests
+
+```bash
+make test
+# or
+python -m unittest discover -s tests -v
+```
+
+They are written on `unittest`, so they run with the standard library alone;
+`pytest` runs them unchanged if it happens to be installed. They cover the
+parts that can silently rot: the answer grammar round trip (print, parse,
+compare), the plot-spec validator, the renderer on every figure kind, the
+problem generators, and the augmentation.
+
+Twenty-five tests, about twenty seconds.
+
+---
+
+## Notes and limits
+
+- **Scope.** Introductory through applied numerical linear algebra. Functional
+  analysis and infinite-dimensional theory are out. If you widen it, widen the
+  families to match.
+- **The graded answer is the mathematics.** For `orthonormal_basis` a basis is
+  only determined up to the sign of each vector, and for `diagonalize` up to the
+  order of the diagonal entries, so those two are compared with the
+  corresponding tolerance rather than exactly.
+- **A plot is not a proof.** The harness compares the numbers in the plot
+  against the numbers in the reference, not the pixels. That is deliberate:
+  it tests the mathematics, and a rendering difference should not be able to
+  fail a correct answer.
+- **The scratchpad is a training target, not a guarantee.** The model will
+  sometimes write arithmetic that does not check out. The host-side verifier
+  is what makes that visible.
+- **Copyright.** This repository generates its own data and downloads nothing.
+  If you extend it with human-written textbooks, check the licence before you
+  redistribute the resulting weights.
+
+Apache-2.0.

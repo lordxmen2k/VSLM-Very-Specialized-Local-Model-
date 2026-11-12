@@ -1,0 +1,63 @@
+# VSLM — configuration.
+#
+# Every value here is also a command line flag; this file exists so that a
+# run can be described in one place and reproduced.
+
+model:
+  # The base model. The Base checkpoint is used rather than the instruct
+  # release because this project defines the output format wholesale and
+  # there is no chat behaviour to preserve.
+  base: Qwen/Qwen3-1.7B-Base
+  # The card this was tuned for.
+  gpu: RTX 4070 12 GB
+  dtype: bfloat16
+
+lora:
+  r: 32
+  alpha: 64
+  dropout: 0.05
+  quantisation: nf4
+  double_quantisation: true
+  target_modules:
+    - q_proj
+    - k_proj
+    - v_proj
+    - o_proj
+    - gate_proj
+    - up_proj
+    - down_proj
+
+training:
+  epochs: 2
+  lr: 1.0e-4
+  warmup_ratio: 0.03
+  max_seq_len: 2048
+  batch_size: 1
+  grad_accum: 16
+  optimiser: paged_adamw_8bit
+  grad_clip: 1.0
+  # Rough cost on one RTX 4070: about 0.7 s per optimiser step for a 1.7B
+  # model at a 2048 token sequence with 16 gradient accumulation steps.
+  # 20 000 examples is roughly 1 250 steps, so about 15 minutes per epoch.
+  expected_steps_per_epoch: 1250
+
+data:
+  n_train: 20000
+  n_test: 200
+  seed: 7
+  workers: 4
+  # Generation is about 9 problems a second on one core and scales roughly
+  # linearly with workers.
+  generation_rate_per_second_per_core: 9
+
+evaluation:
+  temperature: 0.0
+  max_new_tokens: 768
+  batch_size: 8
+  # The four numbers that matter: the graded mathematics, the figure kind, the
+  # figure values, and how often the model says it cannot do the problem.
+  report:
+    - answer_accuracy
+    - plot_kind_accuracy
+    - plot_value_accuracy
+    - abstention_rate

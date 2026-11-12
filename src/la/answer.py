@@ -50,8 +50,14 @@ def _fmt_number(x: sp.Expr) -> str:
     return str(x)
 
 
-def fmt_scalar(expr: sp.Expr) -> str:
-    """Print a scalar in the answer grammar."""
+def fmt_scalar(expr) -> str:
+    """Print a value in the answer grammar.
+
+    A matrix is not a scalar but it is printable here, so that a pair such as
+    "L = ..., U = ..." can be written by one function.
+    """
+    if isinstance(expr, sp.Matrix):
+        return fmt_matrix(expr)
     expr = sp.nsimplify(expr) if expr.is_number else expr
     expr = sp.expand(expr)
 
@@ -66,17 +72,30 @@ def fmt_scalar(expr: sp.Expr) -> str:
         out = "".join(parts).strip()
         return out.lstrip("+ ")
     if expr.is_Mul:
-        args = sp.Mul.make_args(expr)
+        # The sign is carried by the real numeric coefficient. sympy's own
+        # could_extract_minus_sign recurses on a product that contains the
+        # imaginary unit, so the arithmetic is done here instead.
+        coef = sp.Integer(1)
+        rest = []
+        for a in sp.Mul.make_args(expr):
+            # Only a RATIONAL factor becomes part of the coefficient. sqrt(3)
+            # is a number and is real, but folding it into the coefficient
+            # leaves the coefficient as a product again and the printer calls
+            # itself for ever.
+            if a.is_Rational:
+                coef *= a
+            else:
+                rest.append(a)
         lead = ""
-        if expr.could_extract_minus_sign():
+        if coef < 0:
             lead = "-"
-            args = [-a for a in args]
+            coef = -coef
+        if coef != 1:
+            rest.insert(0, coef)
         rendered = []
-        for i, a in enumerate(args):
+        for i, a in enumerate(rest):
             s = fmt_scalar(a)
-            if i > 0 and s.startswith("-"):
-                rendered.append(" - " + s[1:])
-            elif i > 0 and (s.startswith(r"\sqrt") or s.startswith(r"\frac")):
+            if i > 0 and (s.startswith(r"\sqrt") or s.startswith(r"\frac")):
                 rendered.append(s)      # 2\sqrt{3}, not 2 * \sqrt{3}
             else:
                 rendered.append((" * " if i else " * ") + s)
@@ -336,7 +355,25 @@ def parse_answer(text: str) -> Any:
 
 # ------------------------------------------------------------- comparison --
 
-def _scalar_equal(a: sp.Expr, b: sp.Expr, tol: float = 1e-9) -> bool:
+def _vec_equal(u, v, tol: float) -> bool:
+    """Element-wise comparison of two column vectors."""
+    if u.shape != v.shape:
+        return False
+    return all(_scalar_equal(u[i, 0], v[i, 0], tol) for i in range(u.rows))
+
+
+def _mat_equal(u: sp.Matrix, v: sp.Matrix, tol: float) -> bool:
+    if u.shape != v.shape:
+        return False
+    return all(_scalar_equal(u[i, j], v[i, j], tol)
+               for i in range(u.rows) for j in range(u.cols))
+
+
+def _scalar_equal(a, b, tol: float = 1e-9) -> bool:
+    if isinstance(a, sp.Matrix) and isinstance(b, sp.Matrix):
+        return _mat_equal(a, b, tol)
+    if isinstance(a, sp.Matrix) or isinstance(b, sp.Matrix):
+        return False
     try:
         d = sp.simplify(sp.expand(a - b))
         if d == 0:
@@ -351,19 +388,25 @@ def _scalar_equal(a: sp.Expr, b: sp.Expr, tol: float = 1e-9) -> bool:
         return False
 
 
-def answers_equal(a: Any, b: Any, tol: float = 1e-9) -> bool:
+def answers_equal(a: Any, b: Any, tol: float = 1e-9, mode: str = "exact") -> bool:
     """Compare two parsed answers.
 
     Sets are compared as sets, so order does not matter; eigenvalues written
     in a different order still count as correct.
+
+    `mode="basis"` is for an orthonormal basis, which is only determined up to
+    the sign of each vector and the orientation of the set. A basis is
+    therefore compared column by column, each column up to sign, and either
+    orientation of the other matrix is accepted.
     """
+    if mode == "basis":
+        return _basis_equal(a, b, tol)
+    if mode == "diag":
+        return _diag_equal(a, b, tol)
     if isinstance(a, sp.Matrix) or isinstance(b, sp.Matrix):
         if not (isinstance(a, sp.Matrix) and isinstance(b, sp.Matrix)):
             return False
-        if a.shape != b.shape:
-            return False
-        return all(_scalar_equal(a[i, j], b[i, j], tol)
-                   for i in range(a.rows) for j in range(a.cols))
+        return _mat_equal(a, b, tol)
     if isinstance(a, list) and isinstance(b, list):
         if len(a) != len(b):
             return False
@@ -387,7 +430,49 @@ def answers_equal(a: Any, b: Any, tol: float = 1e-9) -> bool:
     return _scalar_equal(a, b, tol)
 
 
-def check_answer(answer_latex: str, truth: Any, tol: float = 1e-9) -> dict:
+def _diag_equal(a: Any, b: Any, tol: float) -> bool:
+    """Compare two diagonal matrices by their diagonal entries, in any order."""
+    if not (isinstance(a, sp.Matrix) and isinstance(b, sp.Matrix)):
+        return answers_equal(a, b, tol)
+    if a.shape != b.shape:
+        return False
+    da = sorted([sp.nsimplify(a[i, i]) for i in range(a.rows)],
+                key=lambda e: float(sp.re(e)) if e.is_number else 0.0)
+    db = sorted([sp.nsimplify(b[i, i]) for i in range(b.rows)],
+                key=lambda e: float(sp.re(e)) if e.is_number else 0.0)
+    return all(_scalar_equal(x, y, tol) for x, y in zip(da, db))
+
+
+def _basis_equal(a: Any, b: Any, tol: float) -> bool:
+    if not (isinstance(a, sp.Matrix) and isinstance(b, sp.Matrix)):
+        return answers_equal(a, b, tol)
+    if a.shape != b.shape:
+        return False
+    for other in (b, b.T):
+        if other.shape != a.shape:
+            continue
+        used = [False] * other.cols
+        ok = True
+        for i in range(a.cols):
+            hit = False
+            for j in range(other.cols):
+                if used[j]:
+                    continue
+                v = other[:, j]
+                if _vec_equal(a[:, i], v, tol) or _vec_equal(a[:, i], -v, tol):
+                    used[j] = True
+                    hit = True
+                    break
+            if not hit:
+                ok = False
+                break
+        if ok and all(used):
+            return True
+    return False
+
+
+def check_answer(answer_latex: str, truth: Any, tol: float = 1e-9,
+                 mode: str = "exact") -> dict:
     """Check a model's answer against a ground truth value.
 
     `truth` may be a parsed object or a string to be parsed.
@@ -401,5 +486,5 @@ def check_answer(answer_latex: str, truth: Any, tol: float = 1e-9) -> dict:
             truth = parse_answer(truth)
         except Exception as exc:
             return {"correct": False, "reason": f"bad truth: {exc}"}
-    ok = answers_equal(got, truth, tol)
+    ok = answers_equal(got, truth, tol, mode=mode)
     return {"correct": bool(ok), "reason": "" if ok else "value mismatch"}

@@ -12,11 +12,22 @@ from __future__ import annotations
 import math
 import os
 
+import logging
+import warnings
+
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.patches import Polygon
+
+# An equal-aspect figure and a two-panel heatmap both make tight_layout
+# complain. The complaints are noise here - the layout is deliberate - so
+# they are silenced rather than left to flood a corpus build.
+warnings.filterwarnings("ignore", message="Tight layout not applied")
+warnings.filterwarnings("ignore", message="Ignoring fixed .* limits")
+# that one is a log record from matplotlib, not a warning
+logging.getLogger("matplotlib").setLevel(logging.ERROR)
 
 # A single restrained palette. The book's aesthetic does not need to be
 # reproduced here, but the figures do need to be legible at print size.
@@ -58,9 +69,23 @@ def _arrow(ax, xy, xytext, color, label=None, label_offset=(4, 6)):
 
 
 def _annotate(ax, spec):
+    """Title and annotations, placed in FIGURE coordinates.
+
+    Axes3D.text needs a third coordinate, so an axes-relative annotation
+    cannot be written for a 3D figure. Figure coordinates work for both.
+    The title sits at the very top and the annotations below it, so the two
+    do not collide.
+    """
+    labels = spec.get("labels", {}) or {}
+    title = labels.get("title")
+    top = 0.972
+    if title:
+        ax.figure.text(0.03, top, title, fontsize=9.5, fontweight="bold",
+                       color=INK, va="top", ha="left")
+        top -= 0.055
     for i, s in enumerate(spec.get("annotate", []) or []):
-        ax.text(0.02, 0.97 - 0.075 * i, s, transform=ax.transAxes,
-                fontsize=9, color=INK, va="top", ha="left")
+        ax.figure.text(0.03, top - 0.038 * i, s, fontsize=9, color=INK,
+                       va="top", ha="left")
 
 
 def render(spec: dict, out_path: str) -> str:
@@ -115,7 +140,7 @@ def _limits_2d(ax, points, pad=0.22, force_equal=True):
     ax.set_xlim(cx - half, cx + half)
     ax.set_ylim(cy - half, cy + half)
     if force_equal:
-        ax.set_aspect("equal", adjustable="datalim")
+        ax.set_aspect("equal", adjustable="box")
 
 
 def _h_basis_2d(fig, ax, data, labels):
@@ -132,7 +157,16 @@ def _h_basis_2d(fig, ax, data, labels):
 
 
 def _h_basis_3d(fig, ax, data, labels):
+    """A three-dimensional basis.
+
+    The default axes is two-dimensional, so it is replaced with a 3D
+    projection; the projection has to be registered with the figure or the
+    scatter call below is the two-dimensional one and rejects the third
+    coordinate.
+    """
     from mpl_toolkits.mplot3d import Axes3D  # noqa: F401  (registers the projection)
+    ax.remove()
+    ax = fig.add_subplot(111, projection="3d")
     vecs = np.asarray(data["vectors"], dtype=float)
     for i, v in enumerate(vecs):
         c = [ACCENT, ACCENT2, ACCENT3, BAND][i % 4]
@@ -172,7 +206,7 @@ def _h_eigenvalue_spectrum(fig, ax, data, labels):
         ax.set_ylim(-m2, m2)
     ax.set_xlabel(labels.get("x", "Re(λ)"))
     ax.set_ylabel(labels.get("y", "Im(λ)"))
-    ax.set_aspect("equal", adjustable="datalim")
+    ax.set_aspect("equal", adjustable="box")
     return ax
 
 
@@ -288,8 +322,7 @@ def _h_transform_unit_square(fig, ax, data, labels):
     ax.set_ylabel(labels.get("y", "x₂"))
     pts = list(unit) + (list(img) if img.size else [])
     _limits_2d(ax, pts)
-    ax.set_title(labels.get("title", "image of the unit square"), fontsize=9,
-                 color=INK, loc="left")
+    # the title is drawn once, at figure level, by _annotate
     return ax
 
 

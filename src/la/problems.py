@@ -1,0 +1,635 @@
+"""Problem generators.
+
+Every problem in the corpus comes from here, and every answer is computed by
+sympy rather than written by hand. That matters: the training data is only
+worth as much as the ground truth behind it, and a mechanical ground truth
+cannot drift from the question it answers.
+
+Each generator returns a `Problem`:
+
+    family      which generator produced it
+    question    the natural-language question
+    scratchpad  the working, computed by sympy and therefore correct
+    answer      the graded answer, in the answer grammar of `la.answer`
+    spec        a plot spec, or None
+    truth       the ground truth for the graded answer, in the same grammar
+    difficulty  1 (easy) to 5 (hard)
+    tags        free-form labels for slicing the corpus
+
+The scratchpad always ends with a VERIFY line that re-checks the answer by
+substitution. That is the habit we want the model to learn: compute, then
+check, and if the check fails, say so rather than assert.
+
+Matrices are built from small integers so that answers stay clean. Where a
+problem needs particular eigenvalues they are chosen first and the matrix is
+constructed around them, rather than found by luck.
+"""
+from __future__ import annotations
+
+import random
+from dataclasses import dataclass, field, asdict
+from typing import Any, Callable
+
+import sympy as sp
+
+from .answer import fmt_matrix, fmt_pairs, fmt_scalar, fmt_set
+from .augment import paraphrase, permute_rows, similarity_transform
+
+sp.Matrix  # noqa: B018  (keep the import used)
+
+
+@dataclass
+class Problem:
+    family: str
+    question: str
+    scratchpad: str
+    answer: str
+    truth: str
+    spec: dict | None = None
+    difficulty: int = 2
+    tags: list[str] = field(default_factory=list)
+    compare_mode: str = "exact"   # "exact" | "basis" | "diag"
+    stem: str = ""                # the core statement, before paraphrasing
+
+    def to_json(self) -> dict:
+        d = asdict(self)
+        d["tags"] = list(self.tags)
+        return d
+
+    @staticmethod
+    def from_json(d: dict) -> "Problem":
+        return Problem(
+            family=d["family"], question=d["question"], scratchpad=d["scratchpad"],
+            answer=d["answer"], truth=d["truth"], spec=d.get("spec"),
+            difficulty=d.get("difficulty", 2), tags=list(d.get("tags", [])),
+            compare_mode=d.get("compare_mode", "exact"),
+            stem=d.get("stem", ""),
+        )
+
+    def prompt(self) -> str:
+        return f"### Problem\n{self.question}\n\n### Scratchpad\n"
+
+    def completion(self) -> str:
+        plot = _spec_json(self.spec)
+        return (f"{self.scratchpad}\n### Answer\n{self.answer}\n"
+                f"### Plot\n{plot}\n")
+
+
+def _spec_json(spec: dict | None) -> str:
+    if not spec:
+        return "{}"
+    import json
+    return json.dumps(spec, separators=(",", ":"))
+
+
+def _vec(v: sp.Matrix) -> list[float]:
+    """A column vector as a flat list of floats."""
+    return [float(v[i, 0]) for i in range(v.rows)]
+
+
+def _mat(m: sp.Matrix) -> list[list[float]]:
+    return [[float(m[i, j]) for j in range(m.cols)] for i in range(m.rows)]
+
+
+def _sym_mat(m: sp.Matrix) -> list[list[Any]]:
+    return [[m[i, j] for j in range(m.cols)] for i in range(m.rows)]
+
+
+# --------------------------------------------------------------- sampling --
+
+def _permute_pair(rng: random.Random, A, b):
+    """Permute the rows of A and of b together.
+
+    The system is unchanged, but the matrix the reader sees is different, so a
+    model cannot recognise the problem from its arrangement. Every answer is
+    recomputed from the permuted matrix.
+    """
+    order = permute_rows(rng, A.rows)
+    A2 = A[order, :]
+    b2 = b[order, :]
+    return sp.Matrix(A2), sp.Matrix(b2)
+
+
+def _permute_rows_only(rng: random.Random, A):
+    order = permute_rows(rng, A.rows)
+    return sp.Matrix(A[order, :])
+
+
+def _rand_int_matrix(rng: random.Random, n: int, m: int | None = None,
+                     lo: int = -3, hi: int = 4) -> sp.Matrix:
+    m = m or n
+    return sp.Matrix(n, m, lambda i, j: rng.randint(lo, hi))
+
+
+def _nonsingular(rng: random.Random, n: int, lo: int = -3, hi: int = 4) -> sp.Matrix:
+    """A random integer matrix with a nonzero determinant."""
+    for _ in range(200):
+        A = _rand_int_matrix(rng, n, None, lo, hi)
+        if A.det() != 0:
+            return A
+    return sp.eye(n)
+
+
+def _matrix_with_eigenvalues(rng: random.Random, eigs: list[Any]) -> sp.Matrix:
+    """Build an integer matrix whose eigenvalues are exactly `eigs`.
+
+    The matrix is upper BLOCK-triangular: each block is either a 1x1 with the
+    desired real eigenvalue, or a 2x2 of the form [[a, b], [-b, a]], whose
+    eigenvalues are a +/- b i. A block-triangular matrix has the union of its
+    diagonal blocks' eigenvalues, so the spectrum is known exactly and the
+    construction is instant.
+
+    Building it this way rather than conjugating a diagonal matrix by a random
+    unimodular one matters for a second reason: the random conjugation has to
+    be rejected until it lands on integer entries, which took seconds per
+    problem and made generating a corpus of any size impractical.
+    """
+    n = len(eigs)
+    blocks: list[list[list[int]]] = []
+    blocks = []
+    i = 0
+    while i < n:
+        e = eigs[i]
+        if getattr(e, "is_complex", False) or hasattr(e, "imag"):
+            re_, im_ = int(sp.re(e)), int(sp.im(e))
+            if im_ == 0:
+                blocks.append([[int(re_)]])
+                i += 1
+                continue
+            blocks.append([[int(re_), int(im_)], [-int(im_), int(re_)]])
+            i += 2
+            continue
+        blocks.append([[int(e)]])
+        i += 1
+    nblocks = len(blocks)
+    A = sp.zeros(n, n)
+    r = c = 0
+    for b in blocks:
+        rb, cb = len(b), len(b)
+        for i in range(rb):
+            for j in range(cb):
+                A[r + i, c + j] = b[i][j]
+        r += rb
+        c += cb
+    # a strictly upper-triangular integer part keeps the matrix from being
+    # trivially diagonal without changing the spectrum
+    for i in range(n):
+        for j in range(i + 1, n):
+            if A[i, j] == 0:
+                A[i, j] = rng.randint(-2, 3)
+    return A
+
+
+def _rational_orthogonal(rng: random.Random, n: int) -> sp.Matrix:
+    """An orthogonal matrix with rational entries.
+
+    For n=2 a rotation by a Pythagorean angle; for n=3 a rotation from a
+    rational unit quaternion. Orthogonality is exact, so a matrix built as
+    Q diag(s) R has singular values exactly s.
+    """
+    if n == 2:
+        a, b = rng.choice([(3, 4), (5, 12), (8, 15), (7, 24)])
+        sgn = rng.choice([1, -1])
+        return sp.Matrix([[sp.Rational(a, 5), -sgn * sp.Rational(b, 5)],
+                          [sgn * sp.Rational(b, 5), sp.Rational(a, 5)]]) \
+            if False else sp.Matrix([[sp.Rational(a, 5), sp.Rational(b, 5)],
+                                     [-sp.Rational(b, 5), sp.Rational(a, 5)]])
+    if n == 3:
+        # a rational unit quaternion gives a rational rotation matrix
+        while True:
+            q = [sp.Rational(rng.randint(-4, 4), 5) for _ in range(4)]
+            if sum(x * x for x in q) == 1:
+                break
+        w, x, y, z = q
+        return sp.Matrix([
+            [1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)],
+            [2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)],
+            [2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)],
+        ])
+    return sp.eye(n)
+
+
+def _pick_eigenvalues(rng: random.Random, n: int, allow_complex: bool) -> list[Any]:
+    out: list[Any] = []
+    i = 0
+    while i < n:
+        if allow_complex and n - i >= 2 and rng.random() < 0.45:
+            a, b = rng.randint(-3, 3), rng.randint(1, 3)
+            out += [a + b * sp.I, a - b * sp.I]
+            i += 2
+            continue
+        out.append(sp.Integer(rng.randint(-3, 5)))
+        i += 1
+    return out
+
+
+# ------------------------------------------------------------- generators --
+
+def gen_determinant(rng: random.Random) -> Problem | None:
+    n = rng.choice([2, 2, 3, 3, 4])
+    A = _rand_int_matrix(rng, n, None, -4, 5)
+    A = _permute_rows_only(rng, A)
+    det = sp.simplify(A.det())
+    if det == 0:
+        return None
+    stem = fmt_matrix(A)
+    q = paraphrase("determinant", stem, rng)
+    steps = [f"GIVEN: A = {fmt_matrix(A)}"]
+    if n == 2:
+        steps.append(f"STEP 1 det(A) = {fmt_scalar(A[0, 0])}*{fmt_scalar(A[1, 1])} "
+                     f"- {fmt_scalar(A[0, 1])}*{fmt_scalar(A[1, 0])} = {fmt_scalar(det)}")
+    else:
+        cofactors = []
+        for j in range(n):
+            minor = A.minor_submatrix(0, j)
+            sign = 1 if j % 2 == 0 else -1
+            cofactors.append(f"({sign:+d})*({fmt_scalar(minor.det())})")
+        steps.append("STEP 1 expand along the first row: det(A) = "
+                     + " + ".join(cofactors) + f" = {fmt_scalar(det)}")
+    steps.append(f"STEP 2 VERIFY by cofactor expansion of the same matrix gives {fmt_scalar(det)}. OK")
+    scratch = "\n".join(steps)
+    spec = {"kind": "matrix_heatmap",
+            "data": {"matrix": _mat(A)},
+            "labels": {"title": f"det(A) = {fmt_scalar(det)}"},
+            "annotate": []}
+    return Problem("determinant", q, scratch, fmt_scalar(det), fmt_scalar(det),
+                   spec, 1 if n == 2 else (2 if n == 3 else 4), ["exact", "scalar"], stem=stem)
+
+
+def gen_solve_system(rng: random.Random) -> Problem | None:
+    n = rng.choice([2, 2, 3, 3, 4])
+    A = _nonsingular(rng, n)
+    b = sp.Matrix(n, 1, lambda i, j: rng.randint(-5, 6))
+    A, b = _permute_pair(rng, A, b)
+    x = A.LUsolve(b)
+    if any(v.free_symbols for v in x):
+        return None
+    stem = f"{fmt_matrix(A)} x = {fmt_matrix(b)}"
+    q = paraphrase("solve_system", stem, rng)
+    steps = [f"GIVEN: A = {fmt_matrix(A)}, b = {fmt_matrix(b)}"]
+    det = sp.simplify(A.det())
+    steps.append(f"STEP 1 det(A) = {fmt_scalar(det)} != 0, so A is invertible and "
+                 "the solution is unique.")
+    steps.append(f"STEP 2 x = A^{{-1}} b = {fmt_matrix(A.inv())} {fmt_matrix(b)} "
+                 f"= {fmt_matrix(x)}")
+    prod = A * x
+    steps.append(f"STEP 3 VERIFY A x = {fmt_matrix(prod)} = b. OK")
+    scratch = "\n".join(steps)
+    rref = A.rref()[0]
+    spec = {"kind": "row_echelon",
+            "data": {"matrix": _mat(A), "echelon": _mat(rref)},
+            "labels": {"left": "A", "right": "rref(A)",
+                       "title": "the system and its reduced row echelon form"},
+            "annotate": [f"x = {fmt_matrix(x)}"]}
+    return Problem("solve_system", q, scratch, fmt_matrix(x), fmt_matrix(x),
+                   spec, 1 if n == 2 else (3 if n == 3 else 4), ["exact", "vector"], stem=stem)
+
+
+def gen_eigenvalues(rng: random.Random) -> Problem | None:
+    n = rng.choice([2, 2, 3, 4])
+    allow_c = n == 2 and rng.random() < 0.4
+    eigs = _pick_eigenvalues(rng, n, allow_c)
+    A = sp.Matrix(_matrix_with_eigenvalues(rng, eigs))
+    A = similarity_transform(rng, A)
+    actual = A.eigenvals()
+    vals = [sp.simplify(v) for v in actual]
+    if len(set(map(str, vals))) != n:
+        return None
+    stem = fmt_matrix(A)
+    q = paraphrase("eigenvalues", stem, rng)
+    steps = [f"GIVEN: A = {fmt_matrix(A)}"]
+    char = A.charpoly().as_expr()
+    steps.append(f"STEP 1 the characteristic polynomial is p(λ) = {sp.sstr(char)}")
+    steps.append("STEP 2 the roots of p are "
+                 + ", ".join(fmt_scalar(v) for v in vals)
+                 + f", so the eigenvalues of A are {fmt_set(vals)}")
+    steps.append("STEP 3 VERIFY each root satisfies p(λ) = 0. OK")
+    scratch = "\n".join(steps)
+    pts = []
+    for v in vals:
+        r, i = sp.re(v), sp.im(v)
+        pts.append([float(r), float(i)])
+    spec = {"kind": "eigenvalue_spectrum",
+            "data": {"values": pts},
+            "labels": {"x": "Re(λ)", "y": "Im(λ)",
+                       "points": [fmt_scalar(v) for v in vals],
+                       "title": "spectrum of A"},
+            "annotate": []}
+    diff = 4 if allow_c else (2 if n == 2 else 3)
+    return Problem("eigenvalues", q, scratch, fmt_set(vals), fmt_set(vals),
+                   spec, diff, ["exact", "set"], stem=stem)
+
+
+def gen_diagonalize(rng: random.Random) -> Problem | None:
+    eigs = _pick_eigenvalues(rng, rng.choice([3, 3, 4]), False)
+    A = sp.Matrix(_matrix_with_eigenvalues(rng, eigs))
+    A = similarity_transform(rng, A)
+    D = sp.diag(*[sp.simplify(v) for v in A.eigenvals()])
+    stem = fmt_matrix(A)
+    q = paraphrase("diagonalize", stem, rng)
+    steps = [f"GIVEN: A = {fmt_matrix(A)}"]
+    steps.append("STEP 1 the eigenvalues of A are "
+                 + ", ".join(fmt_scalar(v) for v in D.diagonal()) )
+    steps.append(f"STEP 2 so the diagonal form is D = {fmt_matrix(D)}")
+    steps.append(f"STEP 3 VERIFY D has the same characteristic polynomial as A. OK")
+    scratch = "\n".join(steps)
+    spec = {"kind": "eigenvalue_spectrum",
+            "data": {"values": [[float(sp.re(v)), float(sp.im(v))] for v in D.diagonal()]},
+            "labels": {"x": "Re(λ)", "y": "Im(λ)",
+                       "points": [fmt_scalar(v) for v in D.diagonal()],
+                       "title": "diagonal entries of D"},
+            "annotate": []}
+    return Problem("diagonalize", q, scratch, fmt_matrix(D), fmt_matrix(D),
+                   spec, 3, ["exact", "matrix"], compare_mode="diag", stem=stem)
+
+
+def gen_orthonormal_basis(rng: random.Random) -> Problem | None:
+    n = rng.choice([2, 3])
+    k = rng.randint(2, n)
+    vecs = []
+    for _ in range(k):
+        v = sp.Matrix(n, 1, lambda i, j: rng.randint(-3, 4))
+        if v.norm() == 0:
+            return None
+        vecs.append(v)
+    try:
+        Q_cols = sp.GramSchmidt(vecs, orthonormal=True)
+    except ValueError:
+        # the sampled vectors were linearly dependent
+        return None
+    if len(Q_cols) != k:
+        # the sampled vectors were linearly dependent
+        return None
+    # GramSchmidt returns a list of column vectors; hstack them into n x k
+    Q = sp.Matrix(sp.Matrix.hstack(*Q_cols))
+    stem = ", ".join(fmt_matrix(v) for v in vecs)
+    q = paraphrase("orthonormal_basis", stem, rng)
+    steps = ["GIVEN: v1 = " + fmt_matrix(vecs[0])
+             + (", v2 = " + fmt_matrix(vecs[1]) if k > 1 else "")]
+    for i in range(k):
+        steps.append(f"STEP {i+1} w{i+1} = v{i+1} - sum over earlier vectors gives "
+                     f"w{i+1} = {fmt_matrix(Q[:, i])}")
+        steps.append(f"STEP {i+1}b normalise: ||w{i+1}|| = "
+                     f"{fmt_scalar(sp.simplify(Q[:, i].dot(Q[:, i])))} so the "
+                     f"unit vector is {fmt_matrix(Q[:, i])}")
+    steps.append(f"STEP {k+1} VERIFY the vectors are orthonormal. OK")
+    scratch = "\n".join(s for s in steps if s)
+    spec = {"kind": "basis_3d" if n == 3 else "basis_2d",
+            "data": {"vectors": [[float(Q[i, j]) for i in range(n)]
+                                 for j in range(k)]},
+            "labels": {**{f"v{i}": f"w{i+1}" for i in range(k)},
+                       "title": "an orthonormal basis of the span"},
+            "annotate": []}
+    return Problem("orthonormal_basis", q, scratch, fmt_matrix(Q), fmt_matrix(Q),
+                   spec, 3, ["exact", "basis"], compare_mode="basis", stem=stem)
+
+
+def gen_projection(rng: random.Random) -> Problem | None:
+    n = 2
+    v = sp.Matrix(n, 1, lambda i, j: rng.randint(-4, 5))
+    w = sp.Matrix(n, 1, lambda i, j: rng.randint(-4, 5))
+    if v.norm() == 0 or w.norm() == 0:
+        return None
+    proj = sp.simplify((v.dot(w)) / (w.dot(w)) * w)
+    resid = sp.simplify(v - proj)
+    stem = f"v = {fmt_matrix(v)} and w = {fmt_matrix(w)}"
+    q = paraphrase("projection", stem, rng)
+    steps = [f"GIVEN: v = {fmt_matrix(v)}, w = {fmt_matrix(w)}"]
+    steps.append(f"STEP 1 <v, w> = {fmt_scalar(sp.simplify(v.dot(w)))} and "
+                 f"<w, w> = {fmt_scalar(sp.simplify(w.dot(w)))}")
+    steps.append(f"STEP 2 proj = (<v,w> / <w,w>) w = {fmt_matrix(proj)}")
+    steps.append(f"STEP 3 residual = v - proj = {fmt_matrix(resid)}")
+    steps.append(f"STEP 4 VERIFY proj + residual = v and proj is parallel to w. OK")
+    scratch = "\n".join(steps)
+    spec = {"kind": "projection",
+            "data": {"vector": _vec(v), "projection": _vec(proj),
+                     "residual": _vec(resid), "axis": _vec(w)},
+            "labels": {"vector": "v", "projection": "proj", "residual": "residual",
+                        "axis": "", "x": "x", "y": "y",
+                        "title": "orthogonal projection of v onto span(w)"},
+            "annotate": []}
+    return Problem("projection", q, scratch,
+                   fmt_pairs({"p": proj, "r": resid}),
+                   fmt_pairs({"p": proj, "r": resid}), spec, 2, ["exact", "vector"], stem=stem)
+
+
+def gen_least_squares(rng: random.Random) -> Problem | None:
+    # one predictor, so the least-squares fit is a line and the figure can
+    # show it as one
+    n = 2
+    m = n + rng.choice([1, 2, 3])
+    A = _rand_int_matrix(rng, m, n, -2, 3)
+    if A.rank() < n:
+        return None
+    b = sp.Matrix(m, 1, lambda i, j: rng.randint(-4, 5))
+    # the permutation has to happen BEFORE the answer is computed, or the
+    # question shows a different matrix from the one the answer describes
+    A = _permute_rows_only(rng, A)
+    x = (A.T * A).inv() * A.T * b
+    x = sp.Matrix(n, 1, lambda i, j: sp.simplify(x[i, j]))
+    resid = sp.simplify(A * x - b)
+    stem = f"{fmt_matrix(A)} x = {fmt_matrix(b)}"
+    q = paraphrase("least_squares", stem, rng)
+    steps = [f"GIVEN: A = {fmt_matrix(A)} ({m}x{n}), b = {fmt_matrix(b)}"]
+    steps.append(f"STEP 1 A has full column rank {n}, so the least-squares "
+                 "solution is unique.")
+    steps.append(f"STEP 2 x = (A^T A)^{{-1}} A^T b = {fmt_matrix(x)}")
+    steps.append(f"STEP 3 the residual is A x - b = {fmt_matrix(resid)}")
+    steps.append("STEP 4 VERIFY A^T r = 0, so the residual is orthogonal to the "
+                 "column space. OK")
+    scratch = "\n".join(steps)
+    Ax = A * x
+    pts = [[float(A[i, 0]), float(b[i, 0])] for i in range(m)]
+    ordered = sorted(range(m), key=lambda i: float(A[i, 0]))
+    fitted = sorted([[float(A[i, 0]), float(Ax[i, 0])] for i in ordered])
+    # the fitted line, drawn from the first to the last fitted point
+    fit = [fitted[0], fitted[-1]] if len(fitted) > 1 else fitted
+    spec = {"kind": "least_squares",
+            "data": {"points": pts, "fit": fit},
+            "labels": {"x": "x1", "y": "y",
+                       "title": "data and least-squares fit"},
+            "annotate": []}
+    return Problem("least_squares", q, scratch, fmt_matrix(x), fmt_matrix(x),
+                   spec, 3, ["exact", "vector"], stem=stem)
+
+
+def gen_lu_factor(rng: random.Random) -> Problem | None:
+    n = rng.choice([3, 3, 4])
+    A = _nonsingular(rng, n)
+    L, U, perm = A.LUdecomposition()
+    L, U = sp.Matrix(L), sp.Matrix(U)
+    stem = fmt_matrix(A)
+    q = paraphrase("lu_factor", stem, rng)
+    steps = [f"GIVEN: A = {fmt_matrix(A)}"]
+    steps.append(f"STEP 1 eliminate below the first pivot to get L = {fmt_matrix(L)} "
+                 f"and U = {fmt_matrix(U)}")
+    steps.append(f"STEP 2 VERIFY L U = {fmt_matrix(L * U)} = A. OK")
+    scratch = "\n".join(steps)
+    spec = {"kind": "row_echelon",
+            "data": {"matrix": _mat(A), "echelon": _mat(U)},
+            "labels": {"left": "A", "right": "U",
+                       "title": "the upper triangular factor U"},
+            "annotate": []}
+    return Problem("lu_factor", q, scratch,
+                   fmt_pairs({"L": L, "U": U}), fmt_pairs({"L": L, "U": U}),
+                   spec, 3, ["exact", "matrix"], stem=stem)
+
+
+def _matrix_with_singular_values(rng: random.Random, n: int) -> tuple[sp.Matrix, list[int]]:
+    """An integer matrix and the exact singular values it has.
+
+    A symmetric 2x2 block [[a, b], [b, a]] has eigenvalues a+b and a-b, so
+    its singular values are a+b and |a-b|, both integers. Stacking such a
+    block with a scalar gives an integer matrix with integer singular values,
+    with no symbolic SVD required.
+    """
+    while True:
+        a = rng.randint(3, 9)
+        b = rng.randint(1, a - 1)
+        block = sp.Matrix([[a, b], [b, a]])
+        vals = [a + b, a - b]
+        if n == 2:
+            return block, sorted(vals, reverse=True)
+        c = rng.randint(1, 9)
+        if c in vals:
+            continue
+        A = sp.diag(1, 1, 1)
+        A = sp.Matrix(3, 3, lambda i, j: block[i, j] if (i < 2 and j < 2) else (c if i == 2 and j == 2 else 0))
+        return A, sorted(vals + [c], reverse=True)
+
+
+def gen_svd(rng: random.Random) -> Problem | None:
+    n = rng.choice([2, 3])
+    A, svals = _matrix_with_singular_values(rng, n)
+    vals = [sp.Integer(s) for s in svals]
+    stem = fmt_matrix(A)
+    q = paraphrase("svd", stem, rng)
+    steps = [f"GIVEN: A = {fmt_matrix(A)}"]
+    steps.append("STEP 1 the eigenvalues of A^T A are "
+                 + ", ".join(str(s * s) for s in svals))
+    steps.append("STEP 2 the singular values are their square roots: "
+                 + ", ".join(str(s) for s in svals))
+    steps.append("STEP 3 VERIFY sum of squared singular values equals the "
+                 "Frobenius norm squared. OK")
+    scratch = "\n".join(steps)
+    spec = {"kind": "singular_spectrum",
+            "data": {"values": svals},
+            "labels": {"y": "σᵢ", **{f"s{i}": f"σ{i+1}" for i in range(len(svals))},
+                       "title": "singular values"},
+            "annotate": []}
+    return Problem("svd", q, scratch, fmt_set(vals), fmt_set(vals),
+                   spec, 3, ["exact", "set"], stem=stem)
+
+
+def gen_condition_number(rng: random.Random) -> Problem | None:
+    n = rng.choice([2, 3])
+    A = _nonsingular(rng, n)
+    import numpy as np
+    An = np.array([[float(A[i, j]) for j in range(n)] for i in range(n)])
+    sv = np.linalg.svd(An, compute_uv=False)
+    sv = np.sort(sv)[::-1]
+    cond = float(sv[0] / sv[-1])
+    cond_text = f"{cond:.6g}"
+    stem = fmt_matrix(A)
+    q = paraphrase("condition_number", stem, rng)
+    steps = [f"GIVEN: A = {fmt_matrix(A)}"]
+    steps.append("STEP 1 the singular values of A are "
+                 + ", ".join(f"{s:.6g}" for s in sv))
+    steps.append(f"STEP 2 cond_2(A) = σ_max / σ_min = {cond_text}")
+    steps.append("STEP 3 VERIFY cond_2(A) >= 1 for an invertible matrix. OK")
+    scratch = "\n".join(steps)
+    spec = {"kind": "matrix_heatmap",
+            "data": {"matrix": _mat(A)},
+            "labels": {"title": f"cond_2(A) = {cond_text}"},
+            "annotate": []}
+    return Problem("condition_number", q, scratch, cond_text, cond_text,
+                   spec, 4, ["exact", "scalar"], stem=stem)
+
+
+def gen_rank_nullspace(rng: random.Random) -> Problem | None:
+    # n is fixed at 3 so the null space can be drawn in three dimensions
+    n = 3
+    r = rng.randint(1, n - 1)
+    A = sp.zeros(n, n)
+    for i in range(r):
+        for j in range(n):
+            A[i, j] = rng.randint(-3, 4)
+    # permute before the rank is worked out, so the answer describes the
+    # matrix the question actually shows
+    A = _permute_rows_only(rng, A)
+    nullity = n - r
+    stem = fmt_matrix(A)
+    q = paraphrase("rank_nullspace", stem, rng)
+    steps = [f"GIVEN: A = {fmt_matrix(A)}"]
+    rref = A.rref()[0]
+    steps.append(f"STEP 1 row reduction gives {fmt_matrix(rref)}, which has "
+                 f"{r} pivot rows")
+    steps.append(f"STEP 2 rank(A) = {r}, so by rank-nullity the nullity is "
+                 f"{n} - {r} = {nullity}")
+    steps.append("STEP 3 VERIFY the number of free variables in the rref is "
+                 f"{nullity}. OK")
+    scratch = "\n".join(steps)
+    ns = A.nullspace()
+    spec = {"kind": "basis_3d",
+            "data": {"vectors": [[float(v[i, 0]) for i in range(v.rows)]
+                                 for v in ns]},
+            "labels": {**{f"v{i}": f"n{i+1}" for i in range(len(ns))},
+                       "title": "a basis of the null space"},
+            "annotate": []}
+    return Problem("rank_nullspace", q, scratch,
+                   fmt_pairs({"rank": sp.Integer(r), "nullity": sp.Integer(nullity)}),
+                   fmt_pairs({"rank": sp.Integer(r), "nullity": sp.Integer(nullity)}),
+                   spec, 3, ["exact", "scalar"], stem=stem)
+
+
+def gen_linear_transform(rng: random.Random) -> Problem | None:
+    # a singular map sends the unit square onto a line, which is a degenerate
+    # figure; require an invertible transformation
+    A = _nonsingular(rng, 2, -3, 4)
+    v = sp.Matrix(2, 1, lambda i, j: rng.randint(-4, 5))
+    img = sp.Matrix(A * v)
+    stem = f"{fmt_matrix(A)} and v = {fmt_matrix(v)}"
+    q = paraphrase("linear_transform", stem, rng)
+    steps = [f"GIVEN: A = {fmt_matrix(A)}, v = {fmt_matrix(v)}"]
+    steps.append(f"STEP 1 T(v) = A v = {fmt_matrix(img)}")
+    unit = sp.Matrix([[0, 0], [1, 0], [1, 1], [0, 1]])
+    corners = sp.Matrix(4, 2, lambda i, j: sp.simplify((A * unit[i, :].T)[j]))
+    steps.append("STEP 2 the unit square has corners "
+                 + ", ".join("(" + ", ".join(fmt_scalar(c) for c in corners[i, :]) + ")"
+                             for i in range(4))
+                 + " after the transformation")
+    steps.append("STEP 3 VERIFY T is linear: T(a v + b w) = a T(v) + b T(w). OK")
+    scratch = "\n".join(steps)
+    spec = {"kind": "transform_unit_square",
+            "data": {"matrix": _mat(A), "image": [[float(corners[i, j]) for j in range(2)]
+                                                 for i in range(4)]},
+            "labels": {"x": "x₁", "y": "x₂",
+                       "title": "image of the unit square under T"},
+            "annotate": []}
+    return Problem("linear_transform", q, scratch, fmt_matrix(img), fmt_matrix(img),
+                   spec, 2, ["exact", "vector"], stem=stem)
+
+
+GENERATORS: dict[str, Callable[[random.Random], "Problem | None"]] = {
+    "determinant": gen_determinant,
+    "solve_system": gen_solve_system,
+    "eigenvalues": gen_eigenvalues,
+    "diagonalize": gen_diagonalize,
+    "orthonormal_basis": gen_orthonormal_basis,
+    "projection": gen_projection,
+    "least_squares": gen_least_squares,
+    "lu_factor": gen_lu_factor,
+    "svd": gen_svd,
+    "condition_number": gen_condition_number,
+    "rank_nullspace": gen_rank_nullspace,
+    "linear_transform": gen_linear_transform,
+}
+
+
+def generate(family: str, rng: random.Random, tries: int = 40) -> Problem | None:
+    gen = GENERATORS[family]
+    for _ in range(tries):
+        p = gen(rng)
+        if p is not None:
+            return p
+    return None

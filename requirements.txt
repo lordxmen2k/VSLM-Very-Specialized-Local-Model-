@@ -1,0 +1,22 @@
+# VSLM — data pipeline only.
+#
+# The training stack is heavier and is listed separately so the corpus can be
+# rebuilt without pulling in torch. Install everything with:
+#
+#     pip install -e ".[train,dev]"
+#
+# and the corpus alone with:
+#
+#     pip install -e .
+
+numpy>=1.24
+sympy>=1.11
+matplotlib>=3.7
+pyyaml>=6.0
+
+# training (the "train" extra)
+# torch>=2.3
+# transformers>=4.45
+# peft>=0.12
+# bitsandbytes>=0.43
+# accelerate>=0.33
