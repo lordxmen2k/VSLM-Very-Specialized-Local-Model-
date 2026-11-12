@@ -24,10 +24,20 @@ dependencies = [
 
 [project.optional-dependencies]
 train = [
-    "torch>=2.3",
+    # torch and bitsandbytes are deliberately NOT listed here.
+    #
+    # Both resolve from PyPI, and PyPI's torch is built against the newest
+    # CUDA release, which bitsandbytes has no binary for. If pip is allowed
+    # to choose, `pip install -e ".[train,dev]"` silently replaces a
+    # CUDA-matched torch with one that cannot load bitsandbytes, and the
+    # run dies inside model loading with a CUDA version mismatch.
+    #
+    # Install them yourself from the index that matches your GPU:
+    #     scripts/setup_windows_gpu.bat        (Windows)
+    #     pip install torch --index-url https://download.pytorch.org/whl/cu130
+    #     pip install --no-deps bitsandbytes
     "transformers>=4.45",
     "peft>=0.12",
-    "bitsandbytes>=0.43",
     "accelerate>=0.33",
 ]
 dev = [

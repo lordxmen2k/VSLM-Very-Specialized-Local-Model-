@@ -1,0 +1,11 @@
+# Pins for packages that pip must not move while the CUDA stack is being
+# sorted out. Use with:
+#
+#     pip install -c constraints.txt <something>
+#
+# The first two were bumped by a `--force-reinstall` and broke packages
+# that depend on them. The last one is a pre-existing conflict in the same
+# environment, not caused by VSLM.
+fsspec[http]==2026.7.0
+filelock>=3.24.2,<4
+numpy<2.5

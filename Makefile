@@ -1,6 +1,7 @@
 # VSLM — a linear algebra model for one 12 GB card.
 #
 #   make setup     install the package and the training stack
+#   make setup-gpu install a CUDA-matched torch and bitsandbytes (Windows)
 #   make preflight check the GPU, CUDA and bitsandbytes before training
 #   make data      build the corpus and the held-out set
 #   make sample    render a sample of figures as a sanity check
@@ -24,10 +25,16 @@ DATA ?= data
 
 export PYTHONPATH := src
 
-.PHONY: setup setup-light preflight data sample train eval bench bench-all chat test clean figures
+.PHONY: setup setup-gpu setup-light preflight data sample train eval bench bench-all chat test clean figures
 
 setup:
 	$(PYTHON) -m pip install -e ".[train,dev]"
+
+# install a CUDA-matched torch and bitsandbytes. Windows only: the script
+# picks the index that matches your GPU and stops pip from replacing torch
+# with the PyPI build.
+setup-gpu:
+	@cmd //c scripts\\setup_windows_gpu.bat
 
 setup-light:
 	$(PYTHON) -m pip install -e .

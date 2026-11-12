@@ -157,6 +157,40 @@ minutes on four.
 
 ---
 
+## Install
+
+### Linux
+
+Install torch **first**. If it is missing, `pip install -e ".[train,dev]"`
+pulls it in from PyPI as a dependency of peft and accelerate, and PyPI's
+torch is the CUDA 13.2 build that bitsandbytes cannot load.
+
+```bash
+pip install torch --index-url https://download.pytorch.org/whl/cu130
+pip install --no-deps bitsandbytes==0.50.2
+pip install -e ".[train,dev]"
+```
+
+### Windows
+
+```bat
+scripts\setup_windows_gpu.bat
+```
+
+### Why torch is not in the requirements
+
+The `train` extra deliberately lists **neither torch nor bitsandbytes**.
+Both resolve from PyPI, and PyPI's torch is the CUDA 13.2 build that
+bitsandbytes cannot load — so if pip is allowed to choose,
+`pip install -e ".[train,dev]"` will quietly replace a working CUDA-matched
+torch with one that breaks the run. Install those two yourself, from the
+index that matches your GPU, and pip will leave them alone.
+
+`make setup` therefore never touches torch. If torch is missing,
+`make preflight` says so in one line.
+
+---
+
 ## The commands
 
 ### Build the corpus
@@ -190,7 +224,10 @@ python -m la.train --data data/train.jsonl --out runs/vslm --epochs 2 --lr 1e-4
 
 Useful flags: `--max-steps 50` for a smoke test, `--limit 2000` for a short
 run, `--max-seq-len 4096` if you have the memory and want longer problems,
-`--no-4bit` for a full-precision run (needs about 24 GB).
+`--precision bf16` to train a LoRA on an unquantised bf16 base (about 7 GB
+in total) instead of the default NF4 quantised one (about 2 GB). The 24 GB
+figure in the table above is for a *full* fine-tune, which this project never
+does — every run is a LoRA.
 
 ### Measure the speed
 
@@ -289,16 +326,41 @@ activations and logits the rest — so it fits a 12 GB card comfortably. The onl
 thing you give up is about 2.5 GB of headroom. Force either path with
 `--precision 4bit` or `--precision bf16`.
 
-**Fix the wheel (better).** Match bitsandbytes to the CUDA version your torch
-is built against. On Windows:
+**Fix the wheel (better).** Match bitsandbytes to a CUDA version it ships a
+binary for. bitsandbytes 0.50.2 — the latest release — ships binaries for
+CUDA 11.8 through **13.0**. PyPI's torch is built against CUDA 13.2, for
+which no binary exists, so the fix is to move torch *down* to 13.0 rather
+than to look for a newer bitsandbytes.
 
-```bash
-pip install torch --index-url https://download.pytorch.org/whl/cu128
-pip install --force-reinstall bitsandbytes
+On Windows:
+
+```bat
+scripts\setup_windows_gpu.bat
 ```
 
-CUDA 12.8 has the widest wheel coverage. `python -m bitsandbytes` prints
-detailed diagnostics about what it found and what it expected.
+That script installs torch 2.12.1+cu130 and torchvision 0.27.1+cu130 from
+the PyTorch index, installs bitsandbytes with `--no-deps` so pip cannot drag
+torch back to PyPI, and restores the packages the previous attempt bumped. By
+hand:
+
+```bash
+pip install --index-url https://download.pytorch.org/whl/cu130 \
+    torch==2.12.1+cu130 torchvision==0.27.1+cu130
+pip install --no-deps bitsandbytes==0.50.2
+```
+
+**Do not run `pip install --force-reinstall bitsandbytes`.** It reinstalls
+every dependency at its newest version, which drags torch in from PyPI
+(the CUDA 13.2 build that cannot load bitsandbytes in the first place) and
+bumped `fsspec` and `filelock` past the versions `datasets` and `virtualenv`
+accept. If you have already run it, the two lines below put those back:
+
+```bash
+pip install "fsspec[http]==2026.7.0" "filelock>=3.24.2,<4"
+```
+
+`constraints.txt` pins them for future installs. `python -m bitsandbytes`
+prints detailed diagnostics about what it found and what it expected.
 
 One more thing worth checking: **Python 3.14 is very new** and the torch and
 bitsandbytes wheel coverage for it is still catching up. If anything else
