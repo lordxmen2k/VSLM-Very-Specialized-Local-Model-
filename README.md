@@ -180,11 +180,12 @@ scripts\setup_windows_gpu.bat
 ### Why torch is not in the requirements
 
 The `train` extra deliberately lists **neither torch nor bitsandbytes**.
-Both resolve from PyPI, and PyPI's torch is the CUDA 13.2 build that
-bitsandbytes cannot load — so if pip is allowed to choose,
-`pip install -e ".[train,dev]"` will quietly replace a working CUDA-matched
-torch with one that breaks the run. Install those two yourself, from the
-index that matches your GPU, and pip will leave them alone.
+Both resolve from PyPI. PyPI's torch is built against the newest CUDA
+release, and an older bitsandbytes has no binary for it — so if pip is
+allowed to choose, `pip install -e ".[train,dev]"` will quietly replace a
+working CUDA-matched torch with one that breaks the run. Install those two
+yourself, from the index that matches your GPU, and pip will leave them
+alone.
 
 `make setup` therefore never touches torch. If torch is missing,
 `make preflight` says so in one line.
@@ -220,6 +221,18 @@ at `data-sample/figures/` before spending an hour on the full corpus.
 make train
 # or
 python -m la.train --data data/train.jsonl --out runs/vslm --epochs 2 --lr 1e-4
+```
+
+Smoke test first — twenty steps on five hundred examples, about a minute:
+
+```bash
+make train TRAIN_ARGS="--max-steps 20 --limit 500"
+```
+
+Then the real run:
+
+```bash
+make train
 ```
 
 Useful flags: `--max-steps 50` for a smoke test, `--limit 2000` for a short
@@ -330,22 +343,30 @@ activations and logits the rest — so it fits a 12 GB card comfortably. The onl
 thing you give up is about 2.5 GB of headroom. Force either path with
 `--precision 4bit` or `--precision bf16`.
 
-**Fix the wheel (better).** Match bitsandbytes to a CUDA version it ships a
-binary for. bitsandbytes 0.50.2 — the latest release — ships binaries for
-CUDA 11.8 through **13.0**. PyPI's torch is built against CUDA 13.2, for
-which no binary exists, so the fix is to move torch *down* to 13.0 rather
-than to look for a newer bitsandbytes.
+**Upgrade bitsandbytes (simplest — keeps your torch).** The current
+bitsandbytes, 0.50.2, bundles native libraries for CUDA **11.8, 12.1, 12.4,
+12.6, 12.8, 13.0 and 13.2**. The mismatch only happens with an *older*
+bitsandbytes, whose newest bundled library is 13.0, meeting a torch built
+against CUDA 13.2:
 
-On Windows:
+```bash
+pip install -U bitsandbytes==0.50.2
+```
+
+`make preflight` prints the CUDA builds the installed bitsandbytes actually
+ships, read out of the package directory, and compares them against your
+torch. If it says `cuda match YES`, the problem is gone.
+
+**Or move torch down** to a CUDA version every bitsandbytes has. This is what
+`scripts\setup_windows_gpu.bat` does on Windows:
 
 ```bat
 scripts\setup_windows_gpu.bat
 ```
 
-That script installs torch 2.12.1+cu130 and torchvision 0.27.1+cu130 from
-the PyTorch index, installs bitsandbytes with `--no-deps` so pip cannot drag
-torch back to PyPI, and restores the packages the previous attempt bumped. By
-hand:
+It installs torch 2.12.1+cu130 and torchvision 0.27.1+cu130 from the PyTorch
+index, installs bitsandbytes with `--no-deps` so pip cannot drag torch back
+to PyPI, and restores the packages a previous attempt bumped. By hand:
 
 ```bash
 pip install --index-url https://download.pytorch.org/whl/cu130 \
@@ -353,11 +374,14 @@ pip install --index-url https://download.pytorch.org/whl/cu130 \
 pip install --no-deps bitsandbytes==0.50.2
 ```
 
+Going this way has one advantage: torchvision 0.27.1 pins `torch==2.12.1`,
+so it clears that conflict on the way past.
+
 **Do not run `pip install --force-reinstall bitsandbytes`.** It reinstalls
-every dependency at its newest version, which drags torch in from PyPI
-(the CUDA 13.2 build that cannot load bitsandbytes in the first place) and
-bumped `fsspec` and `filelock` past the versions `datasets` and `virtualenv`
-accept. If you have already run it, the two lines below put those back:
+every dependency at its newest version, which drags torch in from PyPI and
+bumps `fsspec` and `filelock` past the versions `datasets` and `virtualenv`
+accept. Use `-U` and `--no-deps` instead. If you have already run it, put
+the two back:
 
 ```bash
 pip install "fsspec[http]==2026.7.0" "filelock>=3.24.2,<4"

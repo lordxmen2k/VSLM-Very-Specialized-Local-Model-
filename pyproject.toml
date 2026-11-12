@@ -26,11 +26,12 @@ dependencies = [
 train = [
     # torch and bitsandbytes are deliberately NOT listed here.
     #
-    # Both resolve from PyPI, and PyPI's torch is built against the newest
-    # CUDA release, which bitsandbytes has no binary for. If pip is allowed
-    # to choose, `pip install -e ".[train,dev]"` silently replaces a
-    # CUDA-matched torch with one that cannot load bitsandbytes, and the
-    # run dies inside model loading with a CUDA version mismatch.
+    # Both resolve from PyPI. PyPI's torch is built against the newest CUDA
+    # release, and an older bitsandbytes has no binary for it - the import
+    # succeeds and the run dies later, inside model loading, with a CUDA
+    # version mismatch. If pip is allowed to choose, `pip install -e
+    # ".[train,dev]"` silently replaces a CUDA-matched torch with one that
+    # breaks the run.
     #
     # Install them yourself from the index that matches your GPU:
     #     scripts/setup_windows_gpu.bat        (Windows)

@@ -23,6 +23,15 @@ BASE ?= Qwen/Qwen3-1.7B-Base
 ADAPTER ?= runs/vslm
 DATA ?= data
 
+# Extra flags for the individual targets:
+#   make train TRAIN_ARGS="--max-steps 20 --limit 500"
+#   make eval  EVAL_ARGS="--limit 200"
+#   make bench BENCH_ARGS="--baseline"
+TRAIN_ARGS ?=
+EVAL_ARGS ?=
+BENCH_ARGS ?=
+DATA_ARGS ?=
+
 export PYTHONPATH := src
 
 .PHONY: help setup setup-gpu setup-light preflight data sample train eval bench bench-all chat test clean figures
@@ -58,27 +67,27 @@ preflight:
 
 data:
 	$(PYTHON) -m la.build_dataset --n-train $(N_TRAIN) --n-test $(N_TEST) \
-		--seed $(SEED) --out $(DATA) --workers $(WORKERS)
+		--seed $(SEED) --out $(DATA) --workers $(WORKERS) $(DATA_ARGS)
 
 sample:
 	$(PYTHON) -m la.build_dataset --n-train 240 --n-test 24 --seed $(SEED) \
 		--out $(DATA)-sample --workers $(WORKERS) --render-first 24
 
 train:
-	$(PYTHON) -m la.train --base $(BASE) --data $(DATA)/train.jsonl --out $(ADAPTER)
+	$(PYTHON) -m la.train --base $(BASE) --data $(DATA)/train.jsonl --out $(ADAPTER) $(TRAIN_ARGS)
 
 eval:
 	$(PYTHON) -m la.evaluate --base $(BASE) --adapter $(ADAPTER) \
-		--data $(DATA)/test.jsonl --out $(DATA)/results.jsonl
+		--data $(DATA)/test.jsonl --out $(DATA)/results.jsonl $(EVAL_ARGS)
 
 # the published comparison: LinAlg-Bench, with the base model as a baseline
 bench:
 	$(PYTHON) -m la.bench --base $(BASE) --adapter $(ADAPTER) --benchmark linalg \
-		--out $(DATA)/bench_linalg.jsonl
+		--out $(DATA)/bench_linalg.jsonl $(BENCH_ARGS)
 
 bench-all:
 	$(PYTHON) -m la.bench --base $(BASE) --adapter $(ADAPTER) --benchmark linalg \
-		--baseline --perf --out $(DATA)/bench_linalg.jsonl
+		--baseline --perf --out $(DATA)/bench_linalg.jsonl $(BENCH_ARGS)
 
 chat:
 	$(PYTHON) -m la.chat --base $(BASE) --adapter $(ADAPTER)
