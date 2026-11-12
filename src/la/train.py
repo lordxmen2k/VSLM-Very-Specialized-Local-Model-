@@ -193,7 +193,7 @@ def speed_test(args, rows, tok, model, optim, pad_id) -> int:
     print(f"  sequence cap: {args.max_seq_len} tokens")
     print()
     print(f"  {'batch':>6}{'accum':>7}{'eff':>5}{'s/step':>9}"
-          f"{'tok/s':>10}{'ex/s':>8}{'vram GB':>9}")
+          f"{'tok/s':>10}{'ex/s':>8}{'alloc GB':>10}{'resv GB':>9}{'frag':>7}")
 
     model.train()
     for bs, ga in configs:
@@ -239,10 +239,14 @@ def speed_test(args, rows, tok, model, optim, pad_id) -> int:
             torch.cuda.synchronize()
         el = time.time() - t0
         steps = max(1, step - warm)
-        peak = (torch.cuda.max_memory_allocated() / 1e9
-                if torch.cuda.is_available() else 0.0)
+        if torch.cuda.is_available():
+            alloc = torch.cuda.max_memory_allocated() / 1e9
+            resv = torch.cuda.max_memory_reserved() / 1e9
+        else:
+            alloc = resv = 0.0
         print(f"  {bs:>6}{ga:>7}{bs*ga:>5}{el/steps:>9.2f}"
-              f"{tok_n/max(el,1e-9):>10,.0f}{ex_n/max(el,1e-9):>8.1f}{peak:>9.2f}")
+              f"{tok_n/max(el,1e-9):>10,.0f}{ex_n/max(el,1e-9):>8.1f}"
+              f"{alloc:>10.2f}{resv:>9.2f}{resv-alloc:>7.2f}")
     print()
     return 0
 

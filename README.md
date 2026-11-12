@@ -292,6 +292,15 @@ python -m la.bench --perf --adapter runs/vslm
 Time to first token, decode throughput at batch 1, 4 and 8, peak VRAM and
 model load time.
 
+### One thing to know about the LaTeX
+
+LinAlg-Bench writes every matrix as `\begin{bmatrix}`. This corpus writes
+`\begin{bmatrix}` or `\begin{pmatrix}`, chosen from the contents of the
+matrix, so the same matrix is written the same way within an example while
+different matrices in the same example may use different environments. A
+model that has only ever seen one spelling meets the other for the first
+time on benchmark day, and the answer grammar accepts both.
+
 ### Score it against published results
 
 ```bash

@@ -27,7 +27,7 @@ from .problems import GENERATORS
 # "STEP 1 expand along the first row: det(A) = (+1)*(-4) = 4" still works
 ENDS_IN_NUMBER = re.compile(r"=\s*(-?[0-9]+(?:\.[0-9]+)?)\s*$")
 # lines that are not arithmetic but still end in "= number"
-SKIP_MARKERS = ("begin{pmatrix}", "\\", "det(A)", "VERIFY")
+SKIP_MARKERS = ("begin{", "\\", "det(A)", "VERIFY")
 
 
 def _to_expr(text: str):

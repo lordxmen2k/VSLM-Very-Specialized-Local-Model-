@@ -34,10 +34,26 @@ class TestAnswerGrammar(unittest.TestCase):
     def test_matrix_round_trip(self):
         M = sp.Matrix([[1, 2], [3, 4]])
         text = fmt_matrix(M)
-        self.assertTrue(text.startswith(r"\begin{pmatrix}"))
+        self.assertRegex(text, r"\\begin\{(?:p|b)matrix\}")
         back = parse_answer(text)
         self.assertTrue(answers_equal(back, M))
         self.assertEqual(back.shape, M.shape)
+
+    def test_both_matrix_environments_parse(self):
+        """The corpus writes matrices in two environments and the benchmark
+        uses one of them. A parser that knows only one of them scores every
+        such answer wrong."""
+        M = sp.Matrix([[1, 2], [3, 4]])
+        for env in ("pmatrix", "bmatrix"):
+            text = rf"\begin{{{env}}} 1 & 2 \\ 3 & 4 \end{{{env}}}"
+            back = parse_answer(text)
+            self.assertTrue(answers_equal(back, M), f"{env} failed to parse")
+            self.assertEqual(back.shape, M.shape)
+
+    def test_environments_are_interchangeable(self):
+        a = parse_answer(r"\begin{pmatrix} 1 & 2 \\ 3 & 4 \end{pmatrix}")
+        b = parse_answer(r"\begin{bmatrix} 1 & 2 \\ 3 & 4 \end{bmatrix}")
+        self.assertTrue(answers_equal(a, b))
 
     def test_set_round_trip_and_order_irrelevance(self):
         values = [sp.Integer(1), sp.Integer(3), sp.Integer(-2)]

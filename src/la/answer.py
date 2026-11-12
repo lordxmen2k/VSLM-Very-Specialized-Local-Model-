@@ -11,7 +11,8 @@ own parser, and unit-tests the round trip. The grammar is deliberately small:
     answer   := pairs | set | matrix | scalar
     pairs    := label '=' value (',' label '=' value)*
     set      := '{' value (',' value)* '}'
-    matrix   := '\\begin{pmatrix}' row ('\\\\' row)* '\\end{pmatrix}'
+    matrix   := '\\begin{pmatrix}'|'\\begin{bmatrix}' row ('\\\\' row)*
+                ('\\end{pmatrix}'|'\\end{bmatrix}')
     value    := scalar | matrix | set | pairs
     scalar   := term (('+' | '-') term)*
     term     := factor (('*' | '/') factor)*
@@ -31,6 +32,8 @@ from __future__ import annotations
 
 import re
 from typing import Any
+
+import zlib
 
 import sympy as sp
 
@@ -116,12 +119,30 @@ def fmt_scalar(expr) -> str:
     return str(expr)
 
 
+def matrix_environment(body: str) -> str:
+    """Choose the LaTeX environment a matrix is written in.
+
+    LinAlg-Bench writes every matrix as \\begin{bmatrix}. Most textbooks,
+    and this corpus originally, use \\begin{pmatrix}. A model that has only
+    ever seen one of them meets the other for the first time on benchmark
+    day, which is a distribution shift nobody needs.
+
+    The choice is derived from the contents of the matrix, so the same matrix
+    is always written the same way within an example - the question and the
+    scratchpad agree - while different matrices in the same example may use
+    different environments. That variety is the point: the model should be
+    indifferent to the environment.
+    """
+    return "bmatrix" if (zlib.crc32(body.encode("utf-8")) >> 16) & 1 else "pmatrix"
+
+
 def fmt_matrix(M: sp.Matrix) -> str:
     rows = []
     for i in range(M.rows):
         rows.append(" & ".join(fmt_scalar(M[i, j]) for j in range(M.cols)))
     body = r" \\ ".join(rows)
-    return rf"\begin{{pmatrix}} {body} \end{{pmatrix}}"
+    env = matrix_environment(body)
+    return rf"\begin{{{env}}} {body} \end{{{env}}}"
 
 
 def fmt_set(values) -> str:
@@ -138,8 +159,8 @@ _TOKEN = re.compile(
     r"""\s*(?:
         (?P<frac>\\frac)
       | (?P<sqrt>\\sqrt)
-      | (?P<pmatrix>\\begin\{pmatrix\})
-      | (?P<endpmatrix>\\end\{pmatrix\})
+      | (?P<mbegin>\\begin\{(?:p|b)matrix\})
+      | (?P<mend>\\end\{(?:p|b)matrix\})
       | (?P<rowsep>\\\\)
       | (?P<lbrace>\\{)
       | (?P<rbrace>\\})
@@ -246,7 +267,7 @@ def _parse_matrix(lex: _Lexer) -> sp.Matrix:
     row: list[sp.Expr] = []
     while True:
         k, v = lex.next()
-        if k == "endpmatrix":
+        if k == "mend":
             break
         if k == "rowsep":
             rows.append(row)
@@ -303,7 +324,7 @@ def _parse_set(lex: _Lexer) -> list[sp.Expr]:
 
 def _parse_value(lex: _Lexer) -> Any:
     k, v = lex.peek()
-    if k == "pmatrix":
+    if k == "mbegin":
         lex.next()
         return _parse_matrix(lex)
     if (k == "op" and v == "{") or k == "lbrace":

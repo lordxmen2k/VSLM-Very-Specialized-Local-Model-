@@ -6,6 +6,8 @@ from la.answer import answers_equal, parse_answer
 from la.problems import GENERATORS, generate
 from la.schema import validate_spec
 
+MATRIX_BLOCK = r"\\begin\{(?:p|b)matrix\}.*?\\end\{(?:p|b)matrix\}"
+
 
 class TestProblems(unittest.TestCase):
 
@@ -62,6 +64,20 @@ class TestProblems(unittest.TestCase):
         after = sorted(str(sp.nsimplify(v)) for v in B.eigenvals())
         self.assertEqual(before, after)
 
+    def test_the_corpus_uses_both_matrix_environments(self):
+        """LinAlg-Bench writes every matrix as bmatrix. A corpus that only
+        ever writes pmatrix meets that for the first time on benchmark day."""
+        import re as _re
+        rng = random.Random(101)
+        seen = set()
+        for _ in range(120):
+            p = generate("determinant", rng)
+            if p is None:
+                continue
+            seen.update(_re.findall(r"\\begin\{(p|b)matrix\}", p.question))
+        self.assertEqual({"p", "b"}, seen,
+                         f"expected both environments, saw {seen}")
+
     def test_answer_describes_the_matrix_in_the_question(self):
         """Recompute from the question text and check it agrees.
 
@@ -77,14 +93,14 @@ class TestProblems(unittest.TestCase):
         rng = random.Random(21)
         for _ in range(8):
             p = generate("determinant", rng)
-            blocks = re.findall(r"\\begin\{pmatrix\}.*?\\end\{pmatrix\}", p.question, re.S)
+            blocks = re.findall(MATRIX_BLOCK, p.question, re.S)
             self.assertTrue(blocks, "the question must print the matrix")
             A = parse_answer(blocks[0])
             self.assertEqual(sp.simplify(A.det()), parse_answer(p.answer),
                              "the answer must be the determinant of the matrix shown")
 
             q = generate("least_squares", rng)
-            blocks = re.findall(r"\\begin\{pmatrix\}.*?\\end\{pmatrix\}", q.question, re.S)
+            blocks = re.findall(MATRIX_BLOCK, q.question, re.S)
             A = parse_answer(blocks[0])
             b = parse_answer(blocks[1])
             x = (A.T * A).inv() * A.T * b
