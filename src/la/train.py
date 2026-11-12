@@ -38,6 +38,32 @@ def read_jsonl(path: str) -> list[dict]:
     return out
 
 
+def tokenise_rows(rows: list[dict], tokenizer, max_len: int | None = 2048):
+    """Tokenise every row into (input_ids, labels).
+
+    Prompt tokens are masked, so only the completion is supervised. A
+    max_len of None leaves the sequence untruncated, which is how the speed
+    test measures what the corpus actually needs.
+    """
+    items: list[tuple[list[int], list[int]]] = []
+    for row in rows:
+        prompt = row["prompt"] if "prompt" in row else \
+            f"### Problem\n{row['question']}\n\n### Scratchpad\n"
+        completion = row["completion"] if "completion" in row else \
+            f"{row['scratchpad']}\n### Answer\n{row['answer']}\n### Plot\n" \
+            f"{json.dumps(row.get('spec') or {}, separators=(',', ':'))}\n"
+        p_ids = tokenizer(prompt, add_special_tokens=False)["input_ids"]
+        c_ids = tokenizer(completion, add_special_tokens=False)["input_ids"]
+        if max_len is not None:
+            ids = (p_ids + c_ids)[:max_len]
+            labels = ([IGNORE] * len(p_ids) + c_ids)[:max_len]
+        else:
+            ids = p_ids + c_ids
+            labels = [IGNORE] * len(p_ids) + c_ids
+        items.append((ids, labels))
+    return items
+
+
 class ProblemDataset(Dataset):
     """Prompt tokens are masked; only the completion is supervised.
 
@@ -50,18 +76,7 @@ class ProblemDataset(Dataset):
 
     def __init__(self, rows: list[dict], tokenizer, max_len: int = 2048):
         self.max_len = max_len
-        self.items: list[tuple[list[int], list[int]]] = []
-        for row in rows:
-            prompt = row["prompt"] if "prompt" in row else \
-                f"### Problem\n{row['question']}\n\n### Scratchpad\n"
-            completion = row["completion"] if "completion" in row else \
-                f"{row['scratchpad']}\n### Answer\n{row['answer']}\n### Plot\n" \
-                f"{json.dumps(row.get('spec') or {}, separators=(',', ':'))}\n"
-            p_ids = tokenizer(prompt, add_special_tokens=False)["input_ids"]
-            c_ids = tokenizer(completion, add_special_tokens=False)["input_ids"]
-            ids = (p_ids + c_ids)[:max_len]
-            labels = ([IGNORE] * len(p_ids) + c_ids)[:max_len]
-            self.items.append((ids, labels))
+        self.items = tokenise_rows(rows, tokenizer, max_len)
 
     def __len__(self) -> int:
         return len(self.items)
@@ -183,14 +198,26 @@ def speed_test(args, rows, tok, model, optim, pad_id) -> int:
     print("  speed test")
     print("=" * 72)
 
-    ds0 = ProblemDataset(rows, tok, args.max_seq_len)
-    lengths = [len(ids) for ids, _ in ds0.items]
-    lengths.sort()
+    uncapped = tokenise_rows(rows, tok, None)
+    lengths = sorted(len(ids) for ids, _ in uncapped)
     n = len(lengths)
+    cap = args.max_seq_len
+    cut = sum(1 for L in lengths if L > cap)
     print(f"  corpus: {n} examples, {sum(lengths):,} tokens, "
           f"mean {sum(lengths)/n:.0f} tokens, median {lengths[n//2]}, "
-          f"p95 {lengths[int(n*0.95)]}, max {lengths[-1]}")
-    print(f"  sequence cap: {args.max_seq_len} tokens")
+          f"p95 {lengths[int(n*0.95)]}, p99 {lengths[int(n*0.99)]}, "
+          f"max {lengths[-1]}")
+    print(f"  sequence cap: {cap} tokens")
+    if cut:
+        print(f"  TRUNCATED: {cut}/{n} examples ({100*cut/n:.1f}%) are cut at "
+              f"the cap.")
+        print("  A truncated example loses the end of its completion, which is")
+        print("  where the answer and the plot spec are. Raise --max-seq-len")
+        print("  until this is zero, and check the memory column below.")
+    else:
+        print("  truncation: none")
+    card = torch.cuda.get_device_properties(0).total_memory / 1e9 \
+        if torch.cuda.is_available() else 0.0
     print()
     print(f"  {'batch':>6}{'accum':>7}{'eff':>5}{'s/step':>9}"
           f"{'tok/s':>10}{'ex/s':>8}{'alloc GB':>10}{'resv GB':>9}{'frag':>7}")
@@ -246,7 +273,14 @@ def speed_test(args, rows, tok, model, optim, pad_id) -> int:
             alloc = resv = 0.0
         print(f"  {bs:>6}{ga:>7}{bs*ga:>5}{el/steps:>9.2f}"
               f"{tok_n/max(el,1e-9):>10,.0f}{ex_n/max(el,1e-9):>8.1f}"
-              f"{alloc:>10.2f}{resv:>9.2f}{resv-alloc:>7.2f}")
+              f"{alloc:>10.2f}{resv:>9.2f}{resv-alloc:>7.2f}"
+              + ("   OVER THE CARD" if card and resv > card else ""))
+    print()
+    if card:
+        print(f"  the card has {card:.2f} GB. A configuration whose reserved")
+        print("  memory exceeds it spills into host memory over PCIe, and on")
+        print("  Windows that is several times slower than staying on the card.")
+        print("  Take the fastest row that stays under.")
     print()
     return 0
 
@@ -263,17 +297,21 @@ def main(argv=None) -> int:
     ap.add_argument("--lr", type=float, default=1e-4)
     ap.add_argument("--rank", type=int, default=32)
     ap.add_argument("--alpha", type=int, default=64)
-    ap.add_argument("--max-seq-len", type=int, default=512,
-                    help="the corpus runs to about 450 tokens, so 512 loses "
-                         "nothing and bounds the worst case")
-    ap.add_argument("--batch-size", type=int, default=4,
-                    help="examples per forward pass. 4 keeps the effective "
-                         "batch at 16 with grad-accum 4, and gives the GPU "
-                         "matrices big enough to be worth running")
+    ap.add_argument("--max-seq-len", type=int, default=768,
+                    help="the corpus runs to a median of 344 and a mean of "
+                         "358 tokens, with a tail past 512. 768 leaves the "
+                         "tail intact; make speed-test report how many "
+                         "examples the cap is cutting")
+    ap.add_argument("--batch-size", type=int, default=2,
+                    help="examples per forward pass. 2 with grad-accum 8 "
+                         "keeps the effective batch at 16, and measured "
+                         "fastest of the five shapes tried - 1,633 tok/s "
+                         "against 814 at batch 1 and 231 at batch 4, which "
+                         "spills past the card")
     ap.add_argument("--num-workers", type=int, default=0,
                     help="dataloader workers. The corpus is tokenised up "
                          "front, so 0 is usually enough")
-    ap.add_argument("--grad-accum", type=int, default=4,
+    ap.add_argument("--grad-accum", type=int, default=8,
                     help="gradient accumulation. batch-size x grad-accum is "
                          "the effective batch, which is 16 either way")
     ap.add_argument("--warmup-ratio", type=float, default=0.03)

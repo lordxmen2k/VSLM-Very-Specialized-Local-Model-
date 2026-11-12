@@ -331,8 +331,8 @@ Three reasons for this arrangement:
 | Quantisation | 4-bit NF4, double quantisation, bf16 compute |
 | Adapters | LoRA rank 32, alpha 64, on all seven projections |
 | Trainable | 34,865,152 of 1,755,440,128 parameters — 1.99 % |
-| Sequence length | 512 (the corpus runs to about 450) |
-| Batch | 4, with 4-way accumulation — an effective batch of 16 |
+| Sequence length | 768 (the corpus has a median of 344 tokens and a tail past 512) |
+| Batch | 2, with 8-way accumulation — an effective batch of 16 |
 | Gradient checkpointing | on |
 | Optimiser | `paged_adamw_8bit`, lr 1e-4, cosine, 3 % warmup, weight decay 0.01 |
 | Epochs | 1 |
@@ -359,11 +359,43 @@ layer are recomputed during the backward pass instead of being kept. On a
 **An effective batch of 16** at a learning rate of 1e-4 is a conservative
 setting, which is the right default for a run you might repeat.
 
-**One epoch** over 20,000 procedurally generated examples is 6.1 M tokens.
+**One epoch** over 20,000 procedurally generated examples is 7.2 M tokens.
 Because the corpus is generated, the supply of distinct examples is not the
 constraint — the constraint is what one card can get through. A second pass
 costs twice as much and is usually worth less than twice as much, since the
 model sees the same seventeen shapes either way.
+
+### The measurement that set the batch size
+
+`make speed-test` runs the same data through five micro-batch shapes at the
+same effective batch of 16, on an RTX 4070 SUPER:
+
+```
+   batch  accum  eff   s/step     tok/s    ex/s  alloc GB  resv GB   frag
+       1     16   16     6.87       814     0.1      3.68     4.33   0.66
+       2      8   16     3.58     1,633     0.6      5.04     7.45   2.41
+       4      4   16    24.40       231     0.2      7.78    13.68   5.90
+       8      2   16    36.36       169     0.2    13.24    26.12  12.88
+      16      1   16    29.04       191     0.6    24.03    27.97   3.93
+```
+
+Read the `resv GB` column against the card's 12.88 GB. Batch 1 and batch 2
+stay under it and are fast. Batch 4 crosses it and is **seven times slower**.
+Batch 8 and 16 cross it by a wide margin and are slower still.
+
+The cause is memory, not arithmetic. The logits dominate: a bf16 copy, an
+fp32 copy for the loss, and the gradient of that copy, over a vocabulary of
+151,936. That term scales with micro-batch × sequence length, and once it
+passes the card's physical VRAM the caching allocator spills into host
+memory mapped into the device address space. Every access to it crosses PCIe.
+
+**The rule that follows: take the fastest row whose reserved memory stays
+under the card.** Batch 2 with 8-way accumulation, at 1,633 tokens per second,
+twice as fast as batch 1 and seven times faster than batch 4 — on the same
+effective batch and the same tokens, so the training dynamics are identical.
+
+The budget follows directly. The corpus is 7.2 M tokens per epoch, so one
+epoch is **73 minutes**.
 
 ### The token budget, measured
 
@@ -478,6 +510,27 @@ device, so the number had to mean something other than what it appeared to
 mean: on Windows the driver can map host memory into the device address
 space, so the caching allocator's reserved figure is not comparable across
 platforms. The *allocated* figure is the one to watch.
+
+### Seven times slower, for a reason that was not the reason
+
+For most of a day the belief was that a 250-token sequence at batch 1 left
+the GPU under-occupied, and that batching the micro-batches four times larger
+would fix it. It did not. Batch 4 measured *worse* than batch 1 — 24.40 s
+per step against 6.87 — and the obvious explanation was ruled out by the
+measurement.
+
+The real cause was in a column nobody was reading. The reserved-memory figure
+crossed the card's physical VRAM between batch 2 and batch 4, and every
+configuration on the far side of that line was about seven times slower. The
+logits are the reason: at a vocabulary of 151,936, a bf16 copy, an fp32 copy
+and a gradient over micro-batch × sequence length is the dominant term, and
+past the card's limit the allocator spills to host memory over PCIe.
+
+Two things were wrong with the earlier diagnosis and both were mine. I
+proposed a cause that the measurement did not support, and I attributed a
+step-time variance to "a slow GPU" when the real cause was a shared GPU. The
+speed test exists now because of that, and it prints the reserved figure and
+flags any row that crosses the card.
 
 ### The step times that would not settle
 

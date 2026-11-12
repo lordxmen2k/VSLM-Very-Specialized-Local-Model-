@@ -40,15 +40,42 @@ class TestTrainingDefaults(unittest.TestCase):
         self.assertEqual(16, bs * ga,
                          f"effective batch is {bs} x {ga} = {bs*ga}, not 16")
 
-    def test_micro_batches_are_not_one(self):
-        # batch 1 with 16-way accumulation is what made the run six hours
-        self.assertGreater(self.d["--batch-size"], 1,
-                           "a batch of one leaves the GPU under-occupied")
+    def test_micro_batch_is_the_measured_optimum(self):
+        # make speed-test on an RTX 4070 SUPER measured five shapes at the
+        # same effective batch of 16:
+        #
+        #   batch  accum   s/step     tok/s   reserved
+        #       1     16      6.87       814       4.33   under the card
+        #       2      8      3.58     1,633       7.45   under the card
+        #       4      4     24.40       231      13.68   over it
+        #       8      2     36.36       169      26.12   over it
+        #      16      1     29.04       191      27.97   over it
+        #
+        # A configuration whose reserved memory passes the card's physical
+        # VRAM spills into host memory over PCIe and is several times
+        # slower. Batch 2 was the fastest row that stayed under it.
+        self.assertEqual(2, self.d["--batch-size"])
+        self.assertEqual(8, self.d["--grad-accum"])
 
-    def test_sequence_length_is_bounded(self):
-        # the corpus runs to about 450 tokens; 2048 wastes memory on the
-        # logits and buys nothing
-        self.assertLessEqual(self.d["--max-seq-len"], 512)
+    def test_sequence_length_leaves_the_tail_intact(self):
+        # the corpus runs to a median of 344 tokens with a tail past 512, so
+        # a 512 cap was cutting a few per cent of the examples and losing
+        # the end of their completions. The cap has to clear the tail, and
+        # make speed-test reports how many examples it is still cutting.
+        self.assertGreaterEqual(self.d["--max-seq-len"], 512)
+        self.assertLessEqual(self.d["--max-seq-len"], 1024)
+
+    def test_the_worst_case_logits_leave_room_on_the_card(self):
+        # the logits dominate the memory: a bf16 copy, an fp32 copy for the
+        # loss, and the gradient of that copy, over a vocabulary of 151,936.
+        vocab = 151_936
+        per_token = vocab * (2 + 4 + 4) / 1e9
+        logits_gb = self.d["--batch-size"] * self.d["--max-seq-len"] * per_token
+        # measured: batch 2 at a 512 cap allocated 5.04 GB, of which the
+        # logits are about 1.6 GB
+        estimated = logits_gb + 3.5
+        self.assertLess(estimated, 12.0,
+                        f"the worst case needs about {estimated:.1f} GB")
 
     def test_default_is_one_epoch(self):
         self.assertEqual(1.0, self.d["--epochs"])

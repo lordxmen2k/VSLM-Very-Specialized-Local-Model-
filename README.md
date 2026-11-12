@@ -108,8 +108,8 @@ pip install -e ".[train,dev]"
 make preflight     # 5 s   - check the GPU, the CUDA build and bitsandbytes
 make data          # 1 min  - build 20,000 problems and a held-out set
 make check-arithmetic  # 40 s - prove every printed derivation adds up
-make speed-test    # 10-15 min - measure the cost of a training step
-make train         # see the measured cost below for how long this takes
+make speed-test    # 5-10 min  - measure the cost of a training step
+make train         # ~75 min   - one epoch, measured
 make eval          # score it on the held-out set
 make bench-all     # score it against published frontier models
 make chat          # ask it something
@@ -275,23 +275,49 @@ Training is the part that needs care, and QLoRA is what makes it work:
 | **QLoRA, NF4 base** | **~2 GB** | ~2 GB | yes, very comfortable |
 
 The default is QLoRA: 4-bit NF4 with double quantisation, rank 32, alpha 64,
-gradient checkpointing, sequence length 512, batch size 4 with 4 gradient
+gradient checkpointing, sequence length 768, batch size 2 with 8 gradient
 accumulation steps (an effective batch of 16), `paged_adamw_8bit`, bf16
 compute, lr 1e-4 on a cosine schedule with 3 % warmup, one epoch.
+
+Those numbers are measured, not chosen. `make speed-test` runs the same data
+through five micro-batch shapes at the same effective batch of 16:
+
+```
+   batch  accum  eff   s/step     tok/s    ex/s  alloc GB  resv GB   frag
+       1     16   16     6.87       814     0.1      3.68     4.33   0.66
+       2      8   16     3.58     1,633     0.6      5.04     7.45   2.41
+       4      4   16    24.40       231     0.2      7.78    13.68   5.90
+       8      2   16    36.36       169     0.2    13.24    26.12  12.88
+      16      1   16    29.04       191     0.6    24.03    27.97   3.93
+```
+
+**The reserved-memory column explains the whole table.** The card has 12.88 GB.
+Every configuration that stays under it is fast; every configuration that
+crosses it is about seven times slower. On Windows, exceeding the card's VRAM
+forces the caching allocator to spill into host memory mapped into the device
+address space, and every access to that crosses PCIe.
+
+So the rule is: **take the fastest row whose reserved memory stays under the
+card.** That is batch 2 with 8-way accumulation, at 1,633 tokens per second —
+twice as fast as batch 1, and seven times faster than batch 4.
+
+**The training budget, from that measurement.** The corpus is 20,000
+examples at a mean of 358 tokens, which is 7.16 M tokens per epoch. At 1,633
+tokens per second that is **73 minutes per epoch** — or 1,250 optimiser steps
+at 3.58 s each, which is the same number by another route. Two epochs is about
+two and a half hours.
 
 Only 1.99 % of the parameters are trainable: 34,865,152 LoRA parameters
 against 1,755,440,128 in total. The frozen base is never updated.
 
-**Measured.** On an RTX 4070 SUPER with the GPU shared with a browser and a
-container runtime, a training step took **21.6 s** at batch 4 and **9.0 s** at
-batch 1 — same effective batch, same tokens. Peak allocated memory was
-**7.78 GB** of the card's 12.88 GB.
+**Measured.** On an RTX 4070 SUPER, at batch 2 with 8-way accumulation, a
+training step takes **3.58 s** and the run holds **5.04 GB** allocated of the
+card's 12.88 GB. That is 1,633 tokens per second.
 
-Those two numbers are the reason `make speed-test` exists. Batching the
-micro-batches four times larger made no difference, which ruled out the
-obvious explanation (an under-occupied GPU) and pointed at the cost being per
-token. Run the speed test on an idle machine and it will tell you the real
-cost before you commit to a long run.
+Those numbers are why `make speed-test` exists. An earlier configuration —
+batch 1, 16-way accumulation — ran at 814 tokens per second; batch 4 ran at
+231. The reason turned out to be memory, not arithmetic, and it is written up
+under [When something goes wrong](#when-something-goes-wrong).
 
 ---
 
@@ -596,6 +622,22 @@ One more thing worth checking: **Python 3.14 is very new** and the torch and
 bitsandbytes wheel coverage for it is still catching up. If anything else
 misbehaves once the CUDA issue is resolved, a 3.12 or 3.13 environment is the
 safe choice.
+
+### The training is seven times slower than it should be
+
+If the speed test reports a `resv GB` figure larger than your card's memory,
+the run is spilling into host memory over PCIe, and on Windows that is several
+times slower than staying on the card. The measured table above shows it
+exactly: batch 2 at 7.45 GB reserved is fast, batch 4 at 13.68 GB is seven
+times slower, on the same effective batch and the same tokens.
+
+The lever is the micro-batch, not the batch size as such. The logits
+dominate the memory — a bf16 copy, an fp32 copy for the loss and the
+gradient of that copy, over a vocabulary of 151,936 — and they scale with
+micro-batch × sequence length. Halving the micro-batch halves that term.
+
+`make speed-test` prints `OVER THE CARD` next to any row that crosses the
+limit, and the header reports how many examples the sequence cap is cutting.
 
 ### The step times swing
 
