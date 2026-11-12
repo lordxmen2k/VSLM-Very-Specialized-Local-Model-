@@ -145,13 +145,34 @@ QLoRA saves about 2.5 GB and is somewhat faster. LoRA on a bf16 base is the
 fallback when bitsandbytes will not load, and it fits on its own.
 
 The default is QLoRA: 4-bit NF4 with double quantisation, rank 32, alpha 64,
-gradient checkpointing, sequence length 2048, batch size 1 with 16 gradient
-accumulation steps, `paged_adamw_8bit`, bf16 compute, lr 1e-4 cosine with 3 %
-warmup, two epochs.
+gradient checkpointing, sequence length 512, batch size 4 with 4 gradient
+accumulation steps (an effective batch of 16), `paged_adamw_8bit`, bf16
+compute, lr 1e-4 cosine with 3 % warmup, one epoch.
 
-**Expected cost.** About 1,250 optimiser steps per epoch over 20,000 examples,
-and roughly 0.7 s per step on an RTX 4070 — so about 15 minutes per epoch, or
-30 minutes for the default two. The corpus build is about 9 problems a second
+One epoch is the default because it is the cheap half and the corpus is
+large enough to fill it. For a second pass, `make train TRAIN_ARGS="--epochs 2"`.
+
+**Measured cost.** 1,250 optimiser steps per epoch over 20,000 examples, at
+an effective batch of 16.
+
+The first configuration tried — batch 1, 16-way accumulation, 2048-token
+sequences — measured **9.0 s per optimiser step** on an RTX 4070 SUPER, which
+is **six hours** for two epochs. The default is now batch 4 with 4-way
+accumulation: the same effective batch, the same number of optimiser steps,
+but four times fewer forward and backward passes, each four times larger.
+That is expected to be faster because a 250-token sequence at batch 1 leaves
+the GPU badly under-occupied. **It has not been measured yet.** Measure it
+before committing to a long run:
+
+```bash
+make train TRAIN_ARGS="--max-steps 20 --limit 200 --log-every 1"
+```
+
+The log line reports the time per step, the peak VRAM, and the time spent
+waiting for the data loader, so a slow GPU and a starved loader are
+distinguishable.
+
+The corpus build is about 9 problems a second
 on one core, so 20,000 problems is about 35 minutes on one core or about 10
 minutes on four.
 

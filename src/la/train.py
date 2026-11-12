@@ -39,28 +39,35 @@ def read_jsonl(path: str) -> list[dict]:
 
 
 class ProblemDataset(Dataset):
-    """Prompt tokens are masked; only the completion is supervised."""
+    """Prompt tokens are masked; only the completion is supervised.
+
+    The corpus is tokenised once, here, rather than on every access. A
+    training run reads every row once per epoch, and a loader that calls
+    the tokenizer in the hot loop shows up as a GPU sitting idle between
+    batches - which is indistinguishable from a slow GPU until you measure
+    the two separately.
+    """
 
     def __init__(self, rows: list[dict], tokenizer, max_len: int = 2048):
-        self.rows = rows
-        self.tok = tokenizer
         self.max_len = max_len
+        self.items: list[tuple[list[int], list[int]]] = []
+        for row in rows:
+            prompt = row["prompt"] if "prompt" in row else \
+                f"### Problem\n{row['question']}\n\n### Scratchpad\n"
+            completion = row["completion"] if "completion" in row else \
+                f"{row['scratchpad']}\n### Answer\n{row['answer']}\n### Plot\n" \
+                f"{json.dumps(row.get('spec') or {}, separators=(',', ':'))}\n"
+            p_ids = tokenizer(prompt, add_special_tokens=False)["input_ids"]
+            c_ids = tokenizer(completion, add_special_tokens=False)["input_ids"]
+            ids = (p_ids + c_ids)[:max_len]
+            labels = ([IGNORE] * len(p_ids) + c_ids)[:max_len]
+            self.items.append((ids, labels))
 
     def __len__(self) -> int:
-        return len(self.rows)
+        return len(self.items)
 
     def __getitem__(self, i: int):
-        row = self.rows[i]
-        prompt = row["prompt"] if "prompt" in row else \
-            f"### Problem\n{row['question']}\n\n### Scratchpad\n"
-        completion = row["completion"] if "completion" in row else \
-            f"{row['scratchpad']}\n### Answer\n{row['answer']}\n### Plot\n" \
-            f"{json.dumps(row.get('spec') or {}, separators=(',', ':'))}\n"
-        p_ids = self.tok(prompt, add_special_tokens=False)["input_ids"]
-        c_ids = self.tok(completion, add_special_tokens=False)["input_ids"]
-        # leave room for the sequence end token
-        ids = (p_ids + c_ids)[: self.max_len]
-        labels = ([IGNORE] * len(p_ids) + c_ids)[: self.max_len]
+        ids, labels = self.items[i]
         return {"input_ids": ids, "labels": labels}
 
 
@@ -161,13 +168,26 @@ def main(argv=None) -> int:
     ap.add_argument("--base", default="Qwen/Qwen3-1.7B-Base")
     ap.add_argument("--data", default="data/train.jsonl")
     ap.add_argument("--out", default="runs/vslm")
-    ap.add_argument("--epochs", type=float, default=2.0)
+    ap.add_argument("--epochs", type=float, default=1.0,
+                    help="passes over the corpus. 1 is the default because the "
+                         "corpus is large enough to fill it; 2 is often a "
+                         "little better and costs twice as long")
     ap.add_argument("--lr", type=float, default=1e-4)
     ap.add_argument("--rank", type=int, default=32)
     ap.add_argument("--alpha", type=int, default=64)
-    ap.add_argument("--max-seq-len", type=int, default=2048)
-    ap.add_argument("--batch-size", type=int, default=1)
-    ap.add_argument("--grad-accum", type=int, default=16)
+    ap.add_argument("--max-seq-len", type=int, default=512,
+                    help="the corpus runs to about 450 tokens, so 512 loses "
+                         "nothing and bounds the worst case")
+    ap.add_argument("--batch-size", type=int, default=4,
+                    help="examples per forward pass. 4 keeps the effective "
+                         "batch at 16 with grad-accum 4, and gives the GPU "
+                         "matrices big enough to be worth running")
+    ap.add_argument("--num-workers", type=int, default=0,
+                    help="dataloader workers. The corpus is tokenised up "
+                         "front, so 0 is usually enough")
+    ap.add_argument("--grad-accum", type=int, default=4,
+                    help="gradient accumulation. batch-size x grad-accum is "
+                         "the effective batch, which is 16 either way")
     ap.add_argument("--warmup-ratio", type=float, default=0.03)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--max-steps", type=int, default=0,
@@ -222,6 +242,7 @@ def main(argv=None) -> int:
                               load_4bit=want_4bit)
     ds = ProblemDataset(rows, tok, args.max_seq_len)
     dl = DataLoader(ds, batch_size=args.batch_size, shuffle=True,
+                    num_workers=args.num_workers,
                     collate_fn=lambda b: collate(b, tok.pad_token_id))
 
     steps_per_epoch = math.ceil(len(dl) / args.grad_accum)
@@ -258,10 +279,18 @@ def main(argv=None) -> int:
     done = False
     if torch.cuda.is_available():
         torch.cuda.reset_peak_memory_stats()
+    data_s = 0.0
     for epoch in range(math.ceil(args.epochs)):
         if done:
             break
-        for batch in dl:
+        it = iter(dl)
+        while True:
+            t_fetch = time.time()
+            try:
+                batch = next(it)
+            except StopIteration:
+                break
+            data_s += time.time() - t_fetch
             batch = {k: v.to(model.device) for k, v in batch.items()}
             out = model(**batch)
             loss = out.loss / args.grad_accum
@@ -297,18 +326,23 @@ def main(argv=None) -> int:
                     peak = torch.cuda.max_memory_allocated() / 1e9
                     res = torch.cuda.max_memory_reserved() / 1e9
                     line += f"  vram {peak:.1f}/{res:.1f} GB"
+                line += f"  data {data_s:.1f}s"
+                data_s = 0.0
                 print(line, flush=True)
                 run_loss = 0.0
                 win_micro = 0
             if step >= total_steps:
                 done = True
                 break
+        if done:
+            break
 
     if torch.cuda.is_available():
         print(f"peak vram: {torch.cuda.max_memory_allocated()/1e9:.2f} GB "
               f"allocated, {torch.cuda.max_memory_reserved()/1e9:.2f} GB reserved")
-    print(f"{step:,} optimiser steps in {(time.time()-t0)/60:.1f} min "
-          f"({(time.time()-t0)/max(step,1):.2f} s/step)")
+    total_s = time.time() - t0
+    print(f"{step:,} optimiser steps in {total_s/60:.1f} min "
+          f"({total_s/max(step,1):.2f} s/step)")
 
     model.save_pretrained(args.out)
     tok.save_pretrained(args.out)
