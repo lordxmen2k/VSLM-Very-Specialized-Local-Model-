@@ -238,6 +238,25 @@ def main(argv=None) -> int:
     if not want_4bit:
         print("training a LoRA on a bf16 base: about 7 GB of VRAM in total")
 
+    # print the resolved configuration. The defaults are not on the command
+    # line, so `make -n train` looks identical whether the defaults are the
+    # old ones or the new ones - the only place the difference is visible
+    # is here.
+    print("configuration:")
+    for k, v in (("base", args.base),
+                 ("data", args.data),
+                 ("out", args.out),
+                 ("epochs", args.epochs),
+                 ("batch size", args.batch_size),
+                 ("grad accum", args.grad_accum),
+                 ("effective batch", args.batch_size * args.grad_accum),
+                 ("max seq len", args.max_seq_len),
+                 ("learning rate", args.lr),
+                 ("lora rank / alpha", f"{args.rank} / {args.alpha}"),
+                 ("precision", "4bit NF4" if want_4bit else "bf16"),
+                 ("dataloader workers", args.num_workers)):
+        print(f"  {k:<18} {v}")
+
     tok, model = build_model(args.base, None, args.rank, args.alpha,
                               load_4bit=want_4bit)
     ds = ProblemDataset(rows, tok, args.max_seq_len)
