@@ -91,6 +91,31 @@ TEMPLATES: dict[str, list[str]] = {
         "Give the rank and the nullity of {stem}.",
         "What are rank({stem}) and the dimension of its null space?",
     ],
+    "matrix_trace": [
+        "Compute the trace of {stem}.",
+        "What is tr of the matrix {stem}?",
+        "Find the trace of {stem}.",
+    ],
+    "matrix_transpose": [
+        "Transpose {stem}.",
+        "Give the transpose of {stem}.",
+        "What is {stem} transposed?",
+    ],
+    "matrix_multiply": [
+        "Multiply the matrices {stem}.",
+        "Compute the matrix product {stem}.",
+        "Find AB for A = and B = given as {stem}.",
+    ],
+    "matrix_power": [
+        "Compute the square of {stem}.",
+        "Raise {stem} to the third power.",
+        "Find A^2 for the matrix {stem}.",
+    ],
+    "matrix_vector": [
+        "Multiply the matrix {stem}.",
+        "Compute the matrix-vector product {stem}.",
+        "Find Av for the matrix and vector {stem}.",
+    ],
     "linear_transform": [
         "Let T be the linear transformation of R^2 with matrix {stem}. Compute "
         "T(v) for the given v, and describe the image of the unit square under T.",

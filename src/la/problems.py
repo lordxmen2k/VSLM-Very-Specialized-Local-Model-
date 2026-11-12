@@ -115,6 +115,45 @@ def _permute_rows_only(rng: random.Random, A):
     return sp.Matrix(A[order, :])
 
 
+def _eliminate(A):
+    """Gaussian elimination to upper triangular form, by hand.
+
+    Returns (upper, swaps, trace) where `swaps` is the number of row
+    interchanges and `trace` is a list of (row, multiplier, target) records
+    suitable for a scratchpad line.
+
+    This exists because the cofactor expansion is what frontier models
+    collapse on at 5x5: the benchmark's own error analysis calls them
+    "cofactor-locked" — models that use the cofactor route on a 5x5 lose the
+    sign and the terms. Elimination by row addition leaves the determinant
+    alone, and the only sign that enters is the number of row swaps.
+    """
+    n = A.rows
+    data = [[sp.nsimplify(A[i, j]) for j in range(n)] for i in range(n)]
+    swaps = 0
+    trace: list[tuple[int, sp.Expr, int]] = []
+    for col in range(n):
+        pivot_row = None
+        for r in range(col, n):
+            if data[r][col] != 0:
+                pivot_row = r
+                break
+        if pivot_row is None:
+            continue
+        if pivot_row != col:
+            data[col], data[pivot_row] = data[pivot_row], data[col]
+            swaps += 1
+        pv = data[col][col]
+        for r in range(col + 1, n):
+            if data[r][col] == 0:
+                continue
+            factor = sp.nsimplify(data[r][col] / pv)
+            data[r] = [sp.nsimplify(data[r][j] - factor * data[col][j])
+                       for j in range(n)]
+            trace.append((r, factor, col))
+    return sp.Matrix(data), swaps, trace
+
+
 def _rand_int_matrix(rng: random.Random, n: int, m: int | None = None,
                      lo: int = -3, hi: int = 4) -> sp.Matrix:
     m = m or n
@@ -226,7 +265,9 @@ def _pick_eigenvalues(rng: random.Random, n: int, allow_complex: bool) -> list[A
 # ------------------------------------------------------------- generators --
 
 def gen_determinant(rng: random.Random) -> Problem | None:
-    n = rng.choice([2, 2, 3, 3, 4])
+    # 5x5 is in the mix on purpose: it is where frontier models stop
+    # computing, so the model has to have seen it.
+    n = rng.choice([2, 2, 3, 3, 4, 4, 5, 5])
     A = _rand_int_matrix(rng, n, None, -4, 5)
     A = _permute_rows_only(rng, A)
     det = sp.simplify(A.det())
@@ -238,15 +279,38 @@ def gen_determinant(rng: random.Random) -> Problem | None:
     if n == 2:
         steps.append(f"STEP 1 det(A) = {fmt_scalar(A[0, 0])}*{fmt_scalar(A[1, 1])} "
                      f"- {fmt_scalar(A[0, 1])}*{fmt_scalar(A[1, 0])} = {fmt_scalar(det)}")
-    else:
+    elif n == 3:
         cofactors = []
-        for j in range(n):
+        for j in range(3):
             minor = A.minor_submatrix(0, j)
             sign = 1 if j % 2 == 0 else -1
-            cofactors.append(f"({sign:+d})*({fmt_scalar(minor.det())})")
+            cofactors.append(f"({sign:+d})*({fmt_scalar(sp.simplify(minor.det()))})")
         steps.append("STEP 1 expand along the first row: det(A) = "
                      + " + ".join(cofactors) + f" = {fmt_scalar(det)}")
-    steps.append(f"STEP 2 VERIFY by cofactor expansion of the same matrix gives {fmt_scalar(det)}. OK")
+    else:
+        # elimination by row addition: the determinant is unchanged, and the
+        # only sign is the number of row interchanges
+        U, swaps, trace = _eliminate(A)
+        diag = [sp.nsimplify(U[i, i]) for i in range(n)]
+        if any(d == 0 for d in diag):
+            return None
+        steps.append("STEP 1 eliminate below each pivot by adding a multiple "
+                     "of one row to another, which leaves the determinant alone")
+        for r, factor, col in trace[:6]:
+            steps.append(f"  row {r + 1} -= ({fmt_scalar(factor)}) * row {col + 1}")
+        if len(trace) > 6:
+            steps.append(f"  ... and {len(trace) - 6} more eliminations")
+        prod = sp.nsimplify(sp.prod(diag))
+        factors = [fmt_scalar(d) for d in diag]
+        if swaps % 2:
+            factors[0] = "-" + factors[0]
+        steps.append(f"STEP 2 the upper triangular form has diagonal "
+                     + ", ".join(fmt_scalar(d) for d in diag)
+                     + (f", with {swaps} row interchange"
+                        f"{'s' if swaps != 1 else ''}" if swaps else ""))
+        steps.append(f"STEP 3 det(A) = " + " * ".join(factors)
+                     + f" = {fmt_scalar(det)}")
+    steps.append(f"STEP 4 VERIFY the determinant of the same matrix is {fmt_scalar(det)}. OK")
     scratch = "\n".join(steps)
     spec = {"kind": "matrix_heatmap",
             "data": {"matrix": _mat(A)},
@@ -257,7 +321,7 @@ def gen_determinant(rng: random.Random) -> Problem | None:
 
 
 def gen_solve_system(rng: random.Random) -> Problem | None:
-    n = rng.choice([2, 2, 3, 3, 4])
+    n = rng.choice([2, 2, 3, 3, 4, 5])
     A = _nonsingular(rng, n)
     b = sp.Matrix(n, 1, lambda i, j: rng.randint(-5, 6))
     A, b = _permute_pair(rng, A, b)
@@ -286,7 +350,7 @@ def gen_solve_system(rng: random.Random) -> Problem | None:
 
 
 def gen_eigenvalues(rng: random.Random) -> Problem | None:
-    n = rng.choice([2, 2, 3, 4])
+    n = rng.choice([2, 2, 3, 3, 4, 5])
     allow_c = n == 2 and rng.random() < 0.4
     eigs = _pick_eigenvalues(rng, n, allow_c)
     A = sp.Matrix(_matrix_with_eigenvalues(rng, eigs))
@@ -321,7 +385,7 @@ def gen_eigenvalues(rng: random.Random) -> Problem | None:
 
 
 def gen_diagonalize(rng: random.Random) -> Problem | None:
-    eigs = _pick_eigenvalues(rng, rng.choice([3, 3, 4]), False)
+    eigs = _pick_eigenvalues(rng, rng.choice([3, 3, 4, 5]), False)
     A = sp.Matrix(_matrix_with_eigenvalues(rng, eigs))
     A = similarity_transform(rng, A)
     D = sp.diag(*[sp.simplify(v) for v in A.eigenvals()])
@@ -610,6 +674,98 @@ def gen_linear_transform(rng: random.Random) -> Problem | None:
                    spec, 2, ["exact", "vector"], stem=stem)
 
 
+
+
+def _heatmap_spec(A, title: str) -> dict:
+    return {"kind": "matrix_heatmap", "data": {"matrix": _mat(A)},
+            "labels": {"title": title}, "annotate": []}
+
+
+def gen_matrix_trace(rng: random.Random) -> Problem | None:
+    """The trace of a matrix: the sum of the diagonal."""
+    n = rng.choice([2, 3, 3, 4, 4, 5, 5])
+    A = _rand_int_matrix(rng, n, None, -4, 5)
+    tr = sp.simplify(sp.trace(A))
+    stem = fmt_matrix(A)
+    q = paraphrase("matrix_trace", stem, rng)
+    steps = [f"GIVEN: A = {fmt_matrix(A)}"]
+    steps.append("STEP 1 the trace is the sum of the diagonal entries: "
+                 + " + ".join(fmt_scalar(A[i, i]) for i in range(n))
+                 + f" = {fmt_scalar(tr)}")
+    steps.append(f"STEP 2 VERIFY tr(A) = tr(A^T), so the trace is basis independent. OK")
+    return Problem("matrix_trace", q, "\n".join(steps), fmt_scalar(tr), fmt_scalar(tr),
+                   _heatmap_spec(A, f"tr(A) = {fmt_scalar(tr)}"), 2, ["exact", "scalar"])
+
+
+def gen_matrix_transpose(rng: random.Random) -> Problem | None:
+    """The transpose of a matrix."""
+    n = rng.choice([2, 3, 3, 4, 5])
+    A = _rand_int_matrix(rng, n, None, -4, 5)
+    At = A.T
+    stem = fmt_matrix(A)
+    q = paraphrase("matrix_transpose", stem, rng)
+    steps = [f"GIVEN: A = {fmt_matrix(A)}"]
+    steps.append("STEP 1 the transpose exchanges rows and columns, so "
+                 f"(A^T)_{{ij}} = A_{{ji}}")
+    steps.append(f"STEP 2 A^T = {fmt_matrix(At)}")
+    steps.append("STEP 3 VERIFY (A^T)^T = A and det(A^T) = det(A). OK")
+    return Problem("matrix_transpose", q, "\n".join(steps), fmt_matrix(At), fmt_matrix(At),
+                   _heatmap_spec(At, "the transpose"), 2, ["exact", "matrix"])
+
+
+def gen_matrix_multiply(rng: random.Random) -> Problem | None:
+    """The product of two matrices."""
+    n = rng.choice([2, 3, 3, 4, 4, 5])
+    A = _rand_int_matrix(rng, n, None, -3, 4)
+    B = _rand_int_matrix(rng, n, None, -3, 4)
+    AB = sp.Matrix(A * B)
+    stem = f"{fmt_matrix(A)} and {fmt_matrix(B)}"
+    q = paraphrase("matrix_multiply", stem, rng)
+    steps = [f"GIVEN: A = {fmt_matrix(A)}, B = {fmt_matrix(B)}"]
+    steps.append(f"STEP 1 the entry (i, j) of AB is the dot product of row i of A "
+                 f"with column j of B")
+    steps.append(f"STEP 2 AB = {fmt_matrix(AB)}")
+    steps.append("STEP 3 VERIFY det(AB) = det(A) det(B). OK")
+    return Problem("matrix_multiply", q, "\n".join(steps), fmt_matrix(AB), fmt_matrix(AB),
+                   _heatmap_spec(AB, "the product AB"), 2 if n <= 3 else 4,
+                   ["exact", "matrix"])
+
+
+def gen_matrix_power(rng: random.Random) -> Problem | None:
+    """A small integer power of a matrix."""
+    n = rng.choice([2, 3, 3, 4, 5])
+    A = _rand_int_matrix(rng, n, None, -2, 3)
+    k = rng.choice([2, 3])
+    Ak = sp.Matrix(A ** k)
+    stem = fmt_matrix(A)
+    q = paraphrase("matrix_power", stem, rng)
+    steps = [f"GIVEN: A = {fmt_matrix(A)}, k = {k}"]
+    steps.append(f"STEP 1 A^2 = A A = {fmt_matrix(A ** 2)}")
+    if k == 3:
+        steps.append(f"STEP 2 A^3 = A^2 A = {fmt_matrix(Ak)}")
+    else:
+        steps.append(f"STEP 2 A^2 = {fmt_matrix(Ak)}")
+    steps.append("STEP 3 VERIFY A^k A = A^(k+1). OK")
+    return Problem("matrix_power", q, "\n".join(steps), fmt_matrix(Ak), fmt_matrix(Ak),
+                   _heatmap_spec(Ak, f"A^{k}"), 3 if n <= 3 else 4, ["exact", "matrix"])
+
+
+def gen_matrix_vector(rng: random.Random) -> Problem | None:
+    """A matrix times a vector."""
+    n = rng.choice([2, 3, 3, 4, 4, 5])
+    A = _rand_int_matrix(rng, n, None, -3, 4)
+    v = sp.Matrix(n, 1, lambda i, j: rng.randint(-4, 5))
+    Av = sp.Matrix(A * v)
+    stem = f"{fmt_matrix(A)} and v = {fmt_matrix(v)}"
+    q = paraphrase("matrix_vector", stem, rng)
+    steps = [f"GIVEN: A = {fmt_matrix(A)}, v = {fmt_matrix(v)}"]
+    steps.append("STEP 1 Av is the vector of dot products of the rows of A with v")
+    steps.append(f"STEP 2 Av = {fmt_matrix(Av)}")
+    steps.append("STEP 3 VERIFY the first entry of Av is row 1 of A dotted with v. OK")
+    return Problem("matrix_vector", q, "\n".join(steps), fmt_matrix(Av), fmt_matrix(Av),
+                   _heatmap_spec(A, "the matrix A"), 2 if n <= 3 else 3,
+                   ["exact", "vector"])
+
 GENERATORS: dict[str, Callable[[random.Random], "Problem | None"]] = {
     "determinant": gen_determinant,
     "solve_system": gen_solve_system,
@@ -623,6 +779,11 @@ GENERATORS: dict[str, Callable[[random.Random], "Problem | None"]] = {
     "condition_number": gen_condition_number,
     "rank_nullspace": gen_rank_nullspace,
     "linear_transform": gen_linear_transform,
+    "matrix_trace": gen_matrix_trace,
+    "matrix_transpose": gen_matrix_transpose,
+    "matrix_multiply": gen_matrix_multiply,
+    "matrix_power": gen_matrix_power,
+    "matrix_vector": gen_matrix_vector,
 }
 
 

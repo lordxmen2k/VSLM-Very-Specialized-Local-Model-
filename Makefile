@@ -5,6 +5,7 @@
 #   make sample    render a sample of figures as a sanity check
 #   make train     fine-tune with QLoRA
 #   make eval      score the model on the held-out set
+#   make bench     score it against the published LinAlg-Bench results
 #   make chat      ask it something
 #   make test      run the unit tests
 #
@@ -22,7 +23,7 @@ DATA ?= data
 
 export PYTHONPATH := src
 
-.PHONY: setup setup-light data sample train eval chat test clean figures
+.PHONY: setup setup-light data sample train eval bench bench-all chat test clean figures
 
 setup:
 	$(PYTHON) -m pip install -e ".[train,dev]"
@@ -44,6 +45,15 @@ train:
 eval:
 	$(PYTHON) -m la.evaluate --base $(BASE) --adapter $(ADAPTER) \
 		--data $(DATA)/test.jsonl --out $(DATA)/results.jsonl
+
+# the published comparison: LinAlg-Bench, with the base model as a baseline
+bench:
+	$(PYTHON) -m la.bench --base $(BASE) --adapter $(ADAPTER) --benchmark linalg \
+		--out $(DATA)/bench_linalg.jsonl
+
+bench-all:
+	$(PYTHON) -m la.bench --base $(BASE) --adapter $(ADAPTER) --benchmark linalg \
+		--baseline --perf --out $(DATA)/bench_linalg.jsonl
 
 chat:
 	$(PYTHON) -m la.chat --base $(BASE) --adapter $(ADAPTER)

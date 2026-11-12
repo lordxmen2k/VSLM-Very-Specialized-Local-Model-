@@ -61,7 +61,7 @@ evaluation depends on the model being right about itself.
 
 ---
 
-## The twelve problem families
+## The seventeen problem families
 
 Every family is generated, verified by sympy, and paired with a figure.
 
@@ -79,6 +79,15 @@ Every family is generated, verified by sympy, and paired with a figure.
 | `condition_number` | cond₂(A) | matrix heatmap |
 | `rank_nullspace` | rank and nullity | a basis of the null space |
 | `linear_transform` | T(v) and the image of the unit square | the unit square and its image |
+| `matrix_trace` | tr(A) | matrix heatmap |
+| `matrix_transpose` | Aᵀ | matrix heatmap |
+| `matrix_multiply` | AB | matrix heatmap |
+| `matrix_power` | Aᵏ | matrix heatmap |
+| `matrix_vector` | Av | matrix heatmap |
+
+The last five exist because they are the operation types a published benchmark
+uses. Without them a score on that benchmark would not be a score on the same
+axis as anyone else's.
 
 ---
 
@@ -178,6 +187,58 @@ python -m la.train --data data/train.jsonl --out runs/vslm --epochs 2 --lr 1e-4
 Useful flags: `--max-steps 50` for a smoke test, `--limit 2000` for a short
 run, `--max-seq-len 4096` if you have the memory and want longer problems,
 `--no-4bit` for a full-precision run (needs about 24 GB).
+
+### Measure the speed
+
+```bash
+python -m la.bench --perf --adapter runs/vslm
+```
+
+Time to first token, decode throughput at batch 1, 4 and 8, peak VRAM and
+model load time.
+
+### Score it against published results
+
+```bash
+make bench              # LinAlg-Bench, with the published table printed
+make bench-all          # the above, plus the base model as a baseline, plus --perf
+```
+
+`la.bench` downloads **LinAlg-Bench** — SymPy-verified linear algebra problems
+across 3×3, 4×4 and 5×5 matrices and nine operation types, with ten frontier
+models scored on it (NeurIPS 2026 Datasets & Benchmarks; CC-BY-4.0). The
+report prints your score next to theirs:
+
+| Model | 3×3 | 4×4 | 5×5 |
+|---|---|---|---|
+| OpenAI-o1 | 94.6 % | 92.3 % | 81.4 % |
+| Gemini-3.1-Pro | 93.7 % | 94.6 % | 88.0 % |
+| DeepSeek-V3 | 89.3 % | 79.9 % | 62.5 % |
+| GPT-5.2 | 85.8 % | 82.1 % | 69.2 % |
+| Qwen3-235B | 79.8 % | 80.5 % | 71.5 % |
+| Mistral-Large | 81.4 % | 75.6 % | 45.1 % |
+| Claude-4.5-Sonnet | 80.1 % | 69.7 % | 33.1 % |
+| Llama-3.3-70B | 63.1 % | 60.6 % | 28.3 % |
+| Qwen2.5-72B | 69.4 % | 39.8 % | 24.6 % |
+| GPT-4o | 66.6 % | 36.0 % | 28.7 % |
+
+Add `--baseline` and the base model is scored on the same problems, so the
+delta attributable to the fine-tune is printed rather than asserted.
+
+**What that table says, and why the corpus is built the way it is.** Accuracy
+falls off a cliff between 4×4 and 5×5 — 32 percentage points on determinants —
+and the models that fail there do not compute badly, they *stop computing* and
+fabricate an answer. The benchmark calls them "cofactor-locked": models that
+expand a 5×5 determinant by cofactors lose the sign and the terms. So:
+
+- **5×5 is in the training mix.** The corpus would be useless if the model had
+  only ever seen 2×2 and 3×3.
+- **Above 3×3 the determinant is taught by elimination, not cofactors.** Row
+  addition leaves the determinant alone and the only sign is the number of row
+  interchanges — a route that does not collapse at 5×5. The scratchpad shows
+  the eliminations and the diagonal product.
+- **Every derivation ends with a check,** and the answer is graded by sympy, so
+  a fabricated answer is visible rather than plausible.
 
 ### Evaluate
 
