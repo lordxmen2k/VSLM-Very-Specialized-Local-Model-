@@ -25,7 +25,20 @@ DATA ?= data
 
 export PYTHONPATH := src
 
-.PHONY: setup setup-gpu setup-light preflight data sample train eval bench bench-all chat test clean figures
+.PHONY: help setup setup-gpu setup-light preflight data sample train eval bench bench-all chat test clean figures
+
+help:
+	@echo "VSLM"
+	@echo "  make setup-gpu    install a CUDA-matched torch and bitsandbytes (Windows)"
+	@echo "  make setup       install the package and the training stack"
+	@echo "  make preflight   check the GPU, CUDA and bitsandbytes before training"
+	@echo "  make data        build the corpus and the held-out set"
+	@echo "  make sample      render a sample of figures as a sanity check"
+	@echo "  make train       fine-tune with QLoRA"
+	@echo "  make eval        score the model on the held-out set"
+	@echo "  make bench       score it against the published LinAlg-Bench results"
+	@echo "  make chat        ask it something"
+	@echo "  make test        run the unit tests"
 
 setup:
 	$(PYTHON) -m pip install -e ".[train,dev]"

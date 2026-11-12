@@ -292,6 +292,10 @@ VRAM, whether 4-bit quantisation actually works on *this* machine, whether
 the corpus is present, and which precision the training run will use. It is
 the difference between a dozen lines and a thousand-line traceback.
 
+Make does not search upward for a makefile, so `scripts/Makefile` forwards
+every target to the root one. `make preflight` works from anywhere in the
+tree, including from inside `scripts/`.
+
 ### If bitsandbytes fails to load
 
 `bitsandbytes` ships pre-compiled binaries for specific CUDA versions — 11.8
