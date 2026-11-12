@@ -79,10 +79,37 @@ def collate(batch, pad_id: int):
     }
 
 
+def bitsandbytes_works() -> tuple[bool, str]:
+    """Probe whether bitsandbytes can actually run on this machine.
+
+    Importing it is not enough. The package imports cleanly and then fails
+    later, deep inside model loading, when it cannot find a native binary
+    matching the installed CUDA version - which is what happens on a torch
+    built for a CUDA release that bitsandbytes has no wheel for.
+
+    Returns (usable, reason).
+    """
+    try:
+        import bitsandbytes as bnb
+    except Exception as exc:
+        return False, f"bitsandbytes will not import: {exc}"
+    if not torch.cuda.is_available():
+        return False, "no CUDA device"
+    try:
+        # a real quantisation on the real device, which is the thing that
+        # actually fails when the native binary is missing or mismatched
+        t = torch.zeros(16, 16, device="cuda", dtype=torch.bfloat16)
+        bnb.functional.quantize_4bit(t, quant_type="nf4")
+        return True, ""
+    except Exception as exc:
+        first = str(exc).strip().split("\n")[0][:120]
+        return False, first
+
+
 def build_model(base: str, adapter_out: str | None, rank: int, alpha: int,
                 load_4bit: bool = True, dtype=torch.bfloat16):
-    from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
-    from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+    from peft import LoraConfig, get_peft_model
 
     tok = AutoTokenizer.from_pretrained(base, trust_remote_code=True)
     if tok.pad_token is None:
@@ -90,6 +117,7 @@ def build_model(base: str, adapter_out: str | None, rank: int, alpha: int,
 
     qcfg = None
     if load_4bit:
+        from transformers import BitsAndBytesConfig
         qcfg = BitsAndBytesConfig(
             load_in_4bit=True,
             bnb_4bit_quant_type="nf4",
@@ -101,7 +129,12 @@ def build_model(base: str, adapter_out: str | None, rank: int, alpha: int,
         trust_remote_code=True,
     )
     if load_4bit:
+        from peft import prepare_model_for_kbit_training
         model = prepare_model_for_kbit_training(model, use_gradient_checkpointing=True)
+    else:
+        # with a frozen bf16 base, gradient checkpointing needs the embedding
+        # output to require grad or the backward pass stops at the first block
+        model.enable_input_require_grads()
     model.config.use_cache = False
     model.gradient_checkpointing_enable()
 
@@ -141,8 +174,12 @@ def main(argv=None) -> int:
                     help="stop after this many optimiser steps (smoke test)")
     ap.add_argument("--limit", type=int, default=0,
                     help="use only this many training rows")
+    ap.add_argument("--precision", choices=["auto", "4bit", "bf16"], default="auto",
+                    help="4bit needs bitsandbytes and saves about 2.5 GB; "
+                         "bf16 trains a LoRA on a bf16 base and needs about 7 GB "
+                         "in total, so it fits a 12 GB card on its own")
     ap.add_argument("--no-4bit", action="store_true",
-                    help="train in bf16 instead of 4-bit; needs about 24 GB")
+                    help="deprecated alias for --precision bf16")
     ap.add_argument("--log-every", type=int, default=20)
     args = ap.parse_args(argv)
 
@@ -159,8 +196,30 @@ def main(argv=None) -> int:
         rows = rows[: args.limit]
     print(f"{len(rows):,} training rows from {args.data}")
 
+    # ---- choose the precision, and prove the choice works ------------------
+    want_4bit = args.precision == "4bit" or (args.precision == "auto" and not args.no_4bit)
+    if args.no_4bit and args.precision == "auto":
+        want_4bit = False
+    if want_4bit:
+        ok, reason = bitsandbytes_works()
+        if not ok:
+            print(f"4-bit quantisation is unavailable: {reason}")
+            if args.precision == "4bit":
+                print("--precision 4bit was requested explicitly, so stopping. "
+                      "See the README section on fixing bitsandbytes, or run "
+                      "with --precision bf16.", file=sys.stderr)
+                return 2
+            print("falling back to a LoRA on a bf16 base. It fits in about 7 GB "
+                  "on a 12 GB card, so the run proceeds; only the memory "
+                  "headroom is smaller.")
+            want_4bit = False
+        else:
+            print("4-bit quantisation available (NF4, double quant)")
+    if not want_4bit:
+        print("training a LoRA on a bf16 base: about 7 GB of VRAM in total")
+
     tok, model = build_model(args.base, None, args.rank, args.alpha,
-                              load_4bit=not args.no_4bit)
+                              load_4bit=want_4bit)
     ds = ProblemDataset(rows, tok, args.max_seq_len)
     dl = DataLoader(ds, batch_size=args.batch_size, shuffle=True,
                     collate_fn=lambda b: collate(b, tok.pad_token_id))
@@ -173,15 +232,19 @@ def main(argv=None) -> int:
     print(f"{steps_per_epoch:,} optimiser steps per epoch, {total_steps:,} total, "
           f"{warmup} warmup")
 
-    try:
-        import bitsandbytes as bnb
-        optim = bnb.optim.PagedAdamW8bit(model.parameters(), lr=args.lr, betas=(0.9, 0.95),
-                                         weight_decay=0.01)
-        opt_name = "paged_adamw_8bit"
-    except Exception:
+    optim = None
+    opt_name = "adamw"
+    if want_4bit:
+        try:
+            import bitsandbytes as bnb
+            optim = bnb.optim.PagedAdamW8bit(model.parameters(), lr=args.lr,
+                                             betas=(0.9, 0.95), weight_decay=0.01)
+            opt_name = "paged_adamw_8bit"
+        except Exception as exc:
+            print(f"paged 8-bit AdamW unavailable ({exc}); using torch AdamW")
+    if optim is None:
         optim = torch.optim.AdamW(model.parameters(), lr=args.lr, betas=(0.9, 0.95),
                                   weight_decay=0.01)
-        opt_name = "adamw"
     print(f"optimiser: {opt_name}")
 
     os.makedirs(args.out, exist_ok=True)

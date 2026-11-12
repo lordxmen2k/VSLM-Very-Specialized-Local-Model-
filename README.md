@@ -137,8 +137,11 @@ Training is the part that needs care, and QLoRA is what makes it work:
 | Full fine-tune, AdamW | 27.5 GB | — | no |
 | Full fine-tune, 8-bit Adam | 10.3 GB | ~6 GB | tight; no room for activations |
 | Full fine-tune, offloaded optimiser | 6.9 GB | ~21 GB | yes |
-| **LoRA, bf16 base** | **~4 GB** | ~2 GB | yes, comfortable |
+| **LoRA, bf16 base** | **~7 GB** | ~2 GB | yes, comfortable |
 | **QLoRA, NF4 base** | **~2 GB** | ~2 GB | yes, very comfortable |
+
+QLoRA saves about 2.5 GB and is somewhat faster. LoRA on a bf16 base is the
+fallback when bitsandbytes will not load, and it fits on its own.
 
 The default is QLoRA: 4-bit NF4 with double quantisation, rank 32, alpha 64,
 gradient checkpointing, sequence length 2048, batch size 1 with 16 gradient
@@ -239,6 +242,56 @@ expand a 5×5 determinant by cofactors lose the sign and the terms. So:
   the eliminations and the diagonal product.
 - **Every derivation ends with a check,** and the answer is graded by sympy, so
   a fabricated answer is visible rather than plausible.
+
+### If bitsandbytes fails to load
+
+`bitsandbytes` ships pre-compiled binaries for specific CUDA versions — 11.8
+through 13.0 at the time of writing. If your torch is built against a CUDA
+release it has no wheel for, the import **succeeds** and the failure arrives
+later, inside model loading:
+
+```
+RuntimeError: CUDA VERSION MISMATCH
+Requested CUDA version:          13.2
+Detected PyTorch CUDA version:   13.2
+Available pre-compiled versions:
+  - 11.8 ... 13.0
+```
+
+There are two ways out.
+
+**Let the script handle it (the default).** The training script probes
+bitsandbytes with a real 4-bit quantisation on the GPU *before* it commits to
+the path. If the probe fails it prints why, falls back to a LoRA on a bf16
+base, and carries on:
+
+```
+4-bit quantisation is unavailable: CUDA VERSION MISMATCH ...
+falling back to a LoRA on a bf16 base. It fits in about 7 GB on a 12 GB card,
+so the run proceeds; only the memory headroom is smaller.
+```
+
+A LoRA on a bf16 base needs roughly **7 GB** in total — the frozen weights are
+3.44 GB, the adapters and their optimiser state about 0.5 GB, and the
+activations and logits the rest — so it fits a 12 GB card comfortably. The only
+thing you give up is about 2.5 GB of headroom. Force either path with
+`--precision 4bit` or `--precision bf16`.
+
+**Fix the wheel (better).** Match bitsandbytes to the CUDA version your torch
+is built against. On Windows:
+
+```bash
+pip install torch --index-url https://download.pytorch.org/whl/cu128
+pip install --force-reinstall bitsandbytes
+```
+
+CUDA 12.8 has the widest wheel coverage. `python -m bitsandbytes` prints
+detailed diagnostics about what it found and what it expected.
+
+One more thing worth checking: **Python 3.14 is very new** and the torch and
+bitsandbytes wheel coverage for it is still catching up. If anything else
+misbehaves after the CUDA issue is resolved, a 3.12 or 3.13 environment is
+the safe choice.
 
 ### Evaluate
 
