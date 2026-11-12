@@ -13,6 +13,7 @@ git clone https://github.com/lordxmen2k/VSLM-Very-Specialized-Local-Model-
 cd VSLM-Very-Specialized-Local-Model-
 pip install -e ".[train,dev]"
 
+make preflight # check the GPU, CUDA and bitsandbytes first
 make data      # build the corpus            (~30 min, 4 workers)
 make train     # QLoRA fine-tune            (~30 min for 2 epochs)
 make eval      # score it on the held-out set
@@ -242,6 +243,17 @@ expand a 5×5 determinant by cofactors lose the sign and the terms. So:
   the eliminations and the diagonal product.
 - **Every derivation ends with a check,** and the answer is graded by sympy, so
   a fabricated answer is visible rather than plausible.
+
+### Check the machine first
+
+```bash
+make preflight
+```
+
+Prints the Python and torch versions, the CUDA build, the GPU name and its
+VRAM, whether 4-bit quantisation actually works on *this* machine, whether
+the corpus is present, and which precision the training run will use. It is
+the difference between a dozen lines and a thousand-line traceback.
 
 ### If bitsandbytes fails to load
 

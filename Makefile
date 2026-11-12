@@ -1,6 +1,7 @@
 # VSLM — a linear algebra model for one 12 GB card.
 #
 #   make setup     install the package and the training stack
+#   make preflight check the GPU, CUDA and bitsandbytes before training
 #   make data      build the corpus and the held-out set
 #   make sample    render a sample of figures as a sanity check
 #   make train     fine-tune with QLoRA
@@ -23,13 +24,17 @@ DATA ?= data
 
 export PYTHONPATH := src
 
-.PHONY: setup setup-light data sample train eval bench bench-all chat test clean figures
+.PHONY: setup setup-light preflight data sample train eval bench bench-all chat test clean figures
 
 setup:
 	$(PYTHON) -m pip install -e ".[train,dev]"
 
 setup-light:
 	$(PYTHON) -m pip install -e .
+
+# check the machine before asking it to train
+preflight:
+	$(PYTHON) -m la.preflight
 
 data:
 	$(PYTHON) -m la.build_dataset --n-train $(N_TRAIN) --n-test $(N_TEST) \

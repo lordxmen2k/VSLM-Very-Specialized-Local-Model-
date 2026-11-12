@@ -39,6 +39,7 @@ vslm-build-dataset = "la.build_dataset:main"
 vslm-train = "la.train:main"
 vslm-evaluate = "la.evaluate:main"
 vslm-chat = "la.chat:main"
+vslm-preflight = "la.preflight:main"
 
 [tool.setuptools]
 package-dir = { "" = "src" }
