@@ -99,6 +99,11 @@ test:
 check-arithmetic:
 	$(PYTHON) -m la.check_arithmetic --n 200
 
+# measure the cost of five batch shapes on the same data
+speed-test:
+	$(PYTHON) -m la.train --data $(DATA)/train.jsonl --out runs/speed \
+		--speed-test --limit 2000
+
 clean:
 	rm -rf runs/ outputs/ .pytest_cache/
 	find . -name '__pycache__' -type d -exec rm -rf {} +

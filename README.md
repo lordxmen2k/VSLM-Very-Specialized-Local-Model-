@@ -168,9 +168,29 @@ before committing to a long run:
 make train TRAIN_ARGS="--max-steps 20 --limit 200 --log-every 1"
 ```
 
-The log line reports the time per step, the peak VRAM, and the time spent
-waiting for the data loader, so a slow GPU and a starved loader are
-distinguishable.
+The log line reports the time per step, the peak VRAM, the time spent
+waiting for the data loader, and the tokens per second, so a slow GPU and a
+starved loader are distinguishable.
+
+**Measured, not estimated.** Batch 1 with 16-way accumulation and batch 4
+with 4-way accumulation both measured about 9-10 s per optimiser step, on the
+same effective batch of 16 and the same tokens. Batching alone therefore did
+not help, which rules out the obvious explanation — an under-occupied GPU —
+and points at the cost being per token. `make speed-test` measures that
+directly: the same data through five micro-batch shapes, with the token
+count of the corpus printed alongside.
+
+```
+  corpus: 2000 examples, 612,441 tokens, mean 306 tokens, median 288, p95 431, max 449
+  sequence cap: 512 tokens
+
+  batch  accum  eff   s/step     tok/s     ex/s   vram GB
+      1     16   16      9.02        532     1.8      3.91
+```
+
+Read it as: if `s/step` is flat across the row, the cost is per token and
+the levers are fewer tokens or fewer examples, not a different batch shape.
+If it falls steeply, the micro-batch shape was the problem.
 
 The corpus build measures about 594 problems a second on four workers — the
 20,000-problem training set takes about 34 seconds, and the 40 sample

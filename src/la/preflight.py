@@ -66,10 +66,18 @@ def main(argv=None) -> int:
         print("      make data && make test")
         return 2
 
+    count = torch.cuda.device_count()
+    for i in range(count):
+        name = torch.cuda.get_device_name(i)
+        total = torch.cuda.get_device_properties(i).total_memory / 1e9
+        print(f"  gpu {i}             {name}")
+        print(f"  vram {i}            {total:.1f} GB")
+    if count > 1:
+        print("  NOTE: more than one GPU. The training run uses device 0, but"
+              " the memory counters follow the current device, so a peak that"
+              " exceeds this card's memory belongs to another one.")
     name = torch.cuda.get_device_name(0)
     total = torch.cuda.get_device_properties(0).total_memory / 1e9
-    print(f"  gpu               {name}")
-    print(f"  vram              {total:.1f} GB")
 
     bnb_version, binaries = bitsandbytes_binaries()
     torch_cuda = torch.version.cuda

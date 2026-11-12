@@ -163,6 +163,90 @@ def cosine_lr(step: int, total: int, warmup: int, peak: float) -> float:
     return peak * 0.5 * (1.0 + math.cos(math.pi * min(1.0, prog)))
 
 
+def speed_test(args, rows, tok, model, optim, pad_id) -> int:
+    """Run the same data through several batch shapes and report the cost.
+
+    Batch 1 with 16-way accumulation measured 9.0 s per optimiser step, and
+    batch 4 with 4-way accumulation measured about the same, so the cost is
+    not per example and batching alone does not fix it. This measures where
+    it actually goes: the same effective batch of 16 at five different
+    micro-batch sizes, plus the real token count of the corpus.
+
+    Every configuration is the same effective batch, so every configuration
+    sees the same number of examples per optimiser step. If the time per
+    step barely moves, the cost is per token and the only levers are fewer
+    tokens or fewer examples. If it moves a lot, the micro-batch shape was
+    the problem.
+    """
+    configs = [(1, 16), (2, 8), (4, 4), (8, 2), (16, 1)]
+    print("\n" + "=" * 72)
+    print("  speed test")
+    print("=" * 72)
+
+    ds0 = ProblemDataset(rows, tok, args.max_seq_len)
+    lengths = [len(ids) for ids, _ in ds0.items]
+    lengths.sort()
+    n = len(lengths)
+    print(f"  corpus: {n} examples, {sum(lengths):,} tokens, "
+          f"mean {sum(lengths)/n:.0f} tokens, median {lengths[n//2]}, "
+          f"p95 {lengths[int(n*0.95)]}, max {lengths[-1]}")
+    print(f"  sequence cap: {args.max_seq_len} tokens")
+    print()
+    print(f"  {'batch':>6}{'accum':>7}{'eff':>5}{'s/step':>9}"
+          f"{'tok/s':>10}{'ex/s':>8}{'vram GB':>9}")
+
+    model.train()
+    for bs, ga in configs:
+        ds = ProblemDataset(rows, tok, args.max_seq_len)
+        dl = DataLoader(ds, batch_size=bs, shuffle=True,
+                        collate_fn=lambda b: collate(b, pad_id))
+        optim.zero_grad(set_to_none=True)
+        if torch.cuda.is_available():
+            torch.cuda.reset_peak_memory_stats()
+        warm, measure = 2, 5
+        micro = step = 0
+        cur_tok = 0
+        tok_n = ex_n = 0
+        t0 = time.time()
+        try:
+            for batch in dl:
+                batch = {k: v.to(model.device) for k, v in batch.items()}
+                cur_tok += int(batch["attention_mask"].sum().item())
+                out = model(**batch)
+                (out.loss / ga).backward()
+                micro += 1
+                if micro % ga:
+                    continue
+                torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                optim.step()
+                optim.zero_grad(set_to_none=True)
+                step += 1
+                if step == warm:
+                    if torch.cuda.is_available():
+                        torch.cuda.synchronize()
+                    t0 = time.time()
+                elif step > warm:
+                    tok_n += cur_tok
+                    ex_n += bs
+                cur_tok = 0
+                if step >= warm + measure:
+                    break
+        except torch.cuda.OutOfMemoryError:
+            print(f"  {bs:>6}{ga:>7}{bs*ga:>5}   out of memory")
+            torch.cuda.empty_cache()
+            continue
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+        el = time.time() - t0
+        steps = max(1, step - warm)
+        peak = (torch.cuda.max_memory_allocated() / 1e9
+                if torch.cuda.is_available() else 0.0)
+        print(f"  {bs:>6}{ga:>7}{bs*ga:>5}{el/steps:>9.2f}"
+              f"{tok_n/max(el,1e-9):>10,.0f}{ex_n/max(el,1e-9):>8.1f}{peak:>9.2f}")
+    print()
+    return 0
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="QLoRA fine-tune Qwen3-1.7B")
     ap.add_argument("--base", default="Qwen/Qwen3-1.7B-Base")
@@ -201,6 +285,9 @@ def main(argv=None) -> int:
     ap.add_argument("--no-4bit", action="store_true",
                     help="deprecated alias for --precision bf16")
     ap.add_argument("--log-every", type=int, default=20)
+    ap.add_argument("--speed-test", action="store_true",
+                    help="run the same data through five batch shapes and "
+                         "report the cost of each, then exit")
     args = ap.parse_args(argv)
 
     random.seed(args.seed)
@@ -287,6 +374,11 @@ def main(argv=None) -> int:
                                   weight_decay=0.01)
     print(f"optimiser: {opt_name}")
 
+    if args.speed_test:
+        # the same optimiser the real run uses, so the comparison is fair
+        return speed_test(args, rows[: args.limit or 2000], tok, model, optim,
+                          tok.pad_token_id)
+
     os.makedirs(args.out, exist_ok=True)
     model.train()
     step = 0
@@ -299,6 +391,8 @@ def main(argv=None) -> int:
     if torch.cuda.is_available():
         torch.cuda.reset_peak_memory_stats()
     data_s = 0.0
+    tok_count = 0
+    win_tok = 0
     for epoch in range(math.ceil(args.epochs)):
         if done:
             break
@@ -311,6 +405,7 @@ def main(argv=None) -> int:
                 break
             data_s += time.time() - t_fetch
             batch = {k: v.to(model.device) for k, v in batch.items()}
+            win_tok += int(batch["attention_mask"].sum().item())
             out = model(**batch)
             loss = out.loss / args.grad_accum
             loss.backward()
@@ -346,7 +441,10 @@ def main(argv=None) -> int:
                     res = torch.cuda.max_memory_reserved() / 1e9
                     line += f"  vram {peak:.1f}/{res:.1f} GB"
                 line += f"  data {data_s:.1f}s"
+                if step_s > 0:
+                    line += f"  {win_tok/step_s:,.0f} tok/s"
                 data_s = 0.0
+                win_tok = 0
                 print(line, flush=True)
                 run_loss = 0.0
                 win_micro = 0
