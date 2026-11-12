@@ -344,6 +344,27 @@ expand a 5×5 determinant by cofactors lose the sign and the terms. So:
 - **Every derivation ends with a check,** and the answer is graded by sympy, so
   a fabricated answer is visible rather than plausible.
 
+### If the step times swing
+
+A training step that takes 11 seconds one time and 32 seconds the next, with
+no trend, is not a slow GPU. It is the GPU being interrupted.
+
+Windows time-slices the GPU between processes through the display driver. A
+browser with a video playing, a video call, a container runtime or an
+overlay all hold a context on the card, and the scheduler will hand them a
+slice in the middle of your training step. The interruption length is not
+predictable, which is exactly what the variance looks like.
+
+`make preflight` now asks nvidia-smi what the GPU is doing and warns if it
+is more than 5% busy. Close the browsers, the video call and the container
+runtime before a long run, and watch the step times settle.
+
+One counter is not comparable across platforms. PyTorch's caching allocator
+reports *reserved* memory, and on Windows the driver can map host memory
+into the device address space, so the reserved figure can exceed the card's
+dedicated VRAM. The *allocated* figure is the one to watch: 7.8 GB of 12.9 GB
+is comfortable.
+
 ### Check the machine first
 
 ```bash

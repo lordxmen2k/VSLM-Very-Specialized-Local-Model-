@@ -11,6 +11,7 @@ from __future__ import annotations
 import glob
 import os
 import re
+import subprocess
 import sys
 
 
@@ -35,6 +36,35 @@ def bitsandbytes_binaries() -> tuple[str, list[str]]:
                 found.add(f"{int(digits) // 10}.{int(digits) % 10}")
     ordered = sorted(found, key=lambda s: tuple(int(x) for x in s.split(".")))
     return getattr(bitsandbytes, "__version__", "?"), ordered
+
+
+def nvidia_smi() -> list[dict]:
+    """What nvidia-smi says about each GPU right now.
+
+    PyTorch's own counters do not tell you whether anything else is using
+    the GPU. On Windows the display driver time-slices the GPU between
+    processes, so a background application that holds a context will
+    interrupt a training step for an unpredictable length of time - which
+    looks exactly like a slow GPU and is not one.
+    """
+    query = ("name,memory.used,memory.total,utilization.gpu,"
+             "temperature.gpu,clocks.sm")
+    try:
+        out = subprocess.run(
+            ["nvidia-smi", f"--query-gpu={query}", "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=20)
+    except Exception:
+        return []
+    if out.returncode != 0:
+        return []
+    fields = ["name", "used_mib", "total_mib", "util_pct", "temp_c", "clock_mhz"]
+    rows = []
+    for line in out.stdout.strip().splitlines():
+        parts = [p.strip() for p in line.split(",")]
+        if len(parts) != len(fields):
+            continue
+        rows.append(dict(zip(fields, parts)))
+    return rows
 
 
 def main(argv=None) -> int:
@@ -72,12 +102,27 @@ def main(argv=None) -> int:
         total = torch.cuda.get_device_properties(i).total_memory / 1e9
         print(f"  gpu {i}             {name}")
         print(f"  vram {i}            {total:.1f} GB")
-    if count > 1:
-        print("  NOTE: more than one GPU. The training run uses device 0, but"
-              " the memory counters follow the current device, so a peak that"
-              " exceeds this card's memory belongs to another one.")
     name = torch.cuda.get_device_name(0)
     total = torch.cuda.get_device_properties(0).total_memory / 1e9
+
+    for row in nvidia_smi():
+        try:
+            used = int(row["used_mib"])
+            cap = int(row["total_mib"])
+            util = int(row["util_pct"])
+            temp = int(row["temp_c"])
+        except (ValueError, KeyError):
+            continue
+        print(f"  nvidia-smi        {row['name']}")
+        print(f"    memory          {used:,} / {cap:,} MiB in use")
+        print(f"    utilisation     {util}%   temperature {temp} C   "
+              f"sm clock {row['clock_mhz']} MHz")
+        if util > 5:
+            print("    WARNING: the GPU is busy. Something else is using it.")
+            print("    On Windows the display driver time-slices the GPU between")
+            print("    processes, so a browser, a video call or a container can")
+            print("    interrupt a training step for an unpredictable time. Close")
+            print("    them before a long run and watch the step times settle.")
 
     bnb_version, binaries = bitsandbytes_binaries()
     torch_cuda = torch.version.cuda
