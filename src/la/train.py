@@ -252,8 +252,12 @@ def main(argv=None) -> int:
     step = 0
     micro = 0
     t0 = time.time()
+    last_step_t = t0
     run_loss = 0.0
+    win_micro = 0
     done = False
+    if torch.cuda.is_available():
+        torch.cuda.reset_peak_memory_stats()
     for epoch in range(math.ceil(args.epochs)):
         if done:
             break
@@ -263,6 +267,7 @@ def main(argv=None) -> int:
             loss = out.loss / args.grad_accum
             loss.backward()
             run_loss += out.loss.item()
+            win_micro += 1
             micro += 1
             if micro % args.grad_accum:
                 continue
@@ -273,16 +278,37 @@ def main(argv=None) -> int:
             optim.step()
             optim.zero_grad(set_to_none=True)
             step += 1
-            if step % args.log_every == 0:
-                avg = run_loss / (args.log_every * args.grad_accum)
-                el = time.time() - t0
-                print(f"  step {step:>6,}/{total_steps:,}  loss {avg:.4f}  "
-                      f"lr {lr:.2e}  {el/60:.1f} min  "
-                      f"eta {el/step*(total_steps-step)/60:.1f} min", flush=True)
+            now = time.time()
+            step_s = now - last_step_t
+            last_step_t = now
+            # log the first step, the last step, and every log_every between
+            # them, so a short smoke test still shows a curve
+            if (step % args.log_every == 0 or step == 1 or step == total_steps):
+                # average over the micro-batches actually accumulated since
+                # the last log, not over a full logging window - at step 1
+                # there has only been one
+                avg = run_loss / max(win_micro, 1)
+                el = now - t0
+                line = (f"  step {step:>6,}/{total_steps:,}  loss {avg:.4f}  "
+                        f"lr {lr:.2e}  {step_s:.2f} s/step  "
+                        f"{el/60:.1f} min  "
+                        f"eta {el/step*(total_steps-step)/60:.1f} min")
+                if torch.cuda.is_available():
+                    peak = torch.cuda.max_memory_allocated() / 1e9
+                    res = torch.cuda.max_memory_reserved() / 1e9
+                    line += f"  vram {peak:.1f}/{res:.1f} GB"
+                print(line, flush=True)
                 run_loss = 0.0
+                win_micro = 0
             if step >= total_steps:
                 done = True
                 break
+
+    if torch.cuda.is_available():
+        print(f"peak vram: {torch.cuda.max_memory_allocated()/1e9:.2f} GB "
+              f"allocated, {torch.cuda.max_memory_reserved()/1e9:.2f} GB reserved")
+    print(f"{step:,} optimiser steps in {(time.time()-t0)/60:.1f} min "
+          f"({(time.time()-t0)/max(step,1):.2f} s/step)")
 
     model.save_pretrained(args.out)
     tok.save_pretrained(args.out)
