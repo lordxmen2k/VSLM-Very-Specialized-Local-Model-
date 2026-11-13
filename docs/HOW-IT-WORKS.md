@@ -547,6 +547,33 @@ shows how each multiplier was found:
   the multiplier for row 2 is (-3)/(-2) = 3/2, so row 2 -= (3/2) * row 1
 ```
 
+### The second run
+
+The corpus with the four benchmark-critical families fixed was trained on an
+RTX 4070 SUPER, one epoch, 1,250 steps, effective batch 16, sequence cap
+1,024:
+
+| | run 1 | run 2 | change |
+|---|---|---|---|
+| time | 153.4 min | 142.7 min | −7 % |
+| seconds per step | 7.36 | 6.85 | −7 % |
+| final loss | 0.0661 | **0.0462** | **−30 %** |
+| peak allocated | 4.36 GB | 5.04 GB | +16 % |
+| sustained throughput | 704 tok/s | 885 tok/s | +26 % |
+
+The loss is lower at every matched step past the initial drop: −27 % at step
+100, −32 % at step 580, −30 % at the end. The model fits the corpus better
+when the corpus shows its arithmetic, which is the first evidence that the
+change did what it was supposed to.
+
+The throughput gain is probably not the corpus. Run 1 was sharing the card
+with a benchmark run that was still going; run 2 had the GPU to itself.
+
+The loss plateaus from about step 700 — it sits between 0.037 and 0.050 for
+the last 550 steps while the learning rate decays to zero. The model has
+converged on the training distribution, so a second epoch is unlikely to buy
+much.
+
 ### The other six families
 
 The same defect was in the six families that are not benchmark tasks, and
