@@ -17,7 +17,8 @@ import os
 import sys
 
 from .answer import check_answer
-from .inference import generate, load_model, parse_completion, summarise_answer
+from .inference import generate, load_model
+from .parse import parse_completion, summarise_answer
 from .render import render
 
 

@@ -164,7 +164,7 @@ _TOKEN = re.compile(
       | (?P<rowsep>\\\\)
       | (?P<lbrace>\\{)
       | (?P<rbrace>\\})
-      | (?P<num>\d+(?:\.\d+)?)
+      | (?P<num>\d+(?:\.\d+)?(?:[eE][-+]?\d+)?)
       | (?P<name>[A-Za-z][A-Za-z0-9_]*)
       | (?P<op>[+\-*/=,&{}\[\]().])
     )""",
@@ -338,7 +338,7 @@ def parse_answer(text: str) -> Any:
     Returns one of:
         sp.Expr                     a scalar
         sp.Matrix                   a matrix or vector
-        list[sp.Expr]               a set
+        list[sp.Expr]               a set, or a bare list of values
         dict[str, sp.Expr]          labelled components
     """
     text = text.strip()
@@ -346,7 +346,25 @@ def parse_answer(text: str) -> Any:
         raise ValueError("empty answer")
     lex = _Lexer(text)
     value = _parse_value(lex)
-    # a labelled list: "x_1 = 3, x_2 = -1"
+
+    # a bare list: "-1, 0, 3". LinAlg-Bench writes the eigenvalues this way,
+    # and a grammar that cannot read it scores every eigenvalue problem zero
+    # however well the model does.
+    if isinstance(value, sp.Expr) and not value.is_Symbol:
+        items = [value]
+        while True:
+            k, v = lex.peek()
+            if k == "op" and v == ",":
+                lex.next()
+                items.append(_parse_value(lex))
+                continue
+            break
+        if len(items) > 1:
+            if lex.peek()[0] is not None:
+                raise ValueError(f"trailing tokens in answer: {lex.tokens[lex.i:]}")
+            return items
+
+    # a labelled list or a labelled value: "x_1 = 3, x_2 = -1" or "λ = 1, 2"
     if isinstance(value, sp.Expr) and value.is_Symbol:
         pairs = {}
         while True:
@@ -356,7 +374,28 @@ def parse_answer(text: str) -> Any:
             if k == "op" and v == "=":
                 lex.next()
                 label = str(value)
-                pairs[label] = _parse_value(lex)
+                first = _parse_value(lex)
+                pairs[label] = first
+                # the label may cover a whole list rather than one value
+                items = [first]
+                while True:
+                    k2, v2 = lex.peek()
+                    if k2 == "op" and v2 == ",":
+                        lex.next()
+                        k3, v3 = lex.peek()
+                        if k3 == "name":
+                            # a second labelled pair, not a list
+                            lex.next()
+                            value = sp.Symbol(v3)
+                            break
+                        items.append(_parse_value(lex))
+                        continue
+                    break
+                if len(items) > 1:
+                    if lex.peek()[0] is not None:
+                        raise ValueError(
+                            f"trailing tokens in answer: {lex.tokens[lex.i:]}")
+                    return items
             elif k == "op" and v == ",":
                 lex.next()
                 k2, v2 = lex.peek()

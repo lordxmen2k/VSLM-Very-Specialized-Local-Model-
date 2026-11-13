@@ -520,6 +520,19 @@ the same fraction.
 
 ### The published benchmark
 
+> **The grader was wrong before the model was.** Three separate bugs in the
+> grading harness would have made correct answers score zero: the answer
+> grammar had no rule for a bare comma-separated list, so all ninety
+> eigenvalue problems failed to parse; the benchmark rounds its eigenvalues to
+> four decimal places and the comparison used a tolerance of 1e-9; and
+> `\boxed{...}` was extracted with a non-greedy regex that stopped at the
+> brace inside `\begin{bmatrix}`, truncating 420 of the 660 answers. All
+> three are fixed, and `tests/test_benchmark_grading.py` now downloads the
+> real benchmark and checks that every reference parses, that a correct
+> answer scores correct, and that a wrong answer scores wrong. See
+> [docs/HOW-IT-WORKS.md](docs/HOW-IT-WORKS.md).
+
+
 ```bash
 make bench              # LinAlg-Bench, with the published table printed
 make bench-all          # the above, plus the base model as a baseline, plus --perf

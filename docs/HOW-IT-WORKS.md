@@ -447,9 +447,66 @@ between the model and the renderer. Not worth it.
 
 ## 5. Reading the benchmark score
 
+### The grader is the part that was quietly wrong
+
+Three separate bugs in the grading harness would have made correct answers
+score zero. All three are fixed, and all three are now covered by a test
+that downloads the real benchmark and checks it.
+
+**The grammar had no rule for a bare list.** LinAlg-Bench writes the
+eigenvalues as `\lambda = -1, 0, 3`. Strip the label and you have `-1, 0, 3`
+— a comma-separated list with no braces. The grammar had `set` (braces) and
+`pairs` (labels), and nothing for that. All ninety eigenvalue problems
+failed to parse, which is 14 % of the benchmark.
+
+**The benchmark rounds its eigenvalues.** The references are rounded to four
+decimal places, and the largest gap between a reference and the true
+eigenvalue is **4.991e-05**. The comparison used a tolerance of 1e-9, so a
+correct eigenvalue was rejected. The benchmark comparison now uses 1e-3,
+which is twenty times the measured error and still requires the model to be
+right to three decimal places. Every other task in the benchmark is exact —
+the measured gap for determinant, trace, rank and nullity is zero.
+
+**`\boxed{...}` was extracted with a non-greedy regex.** It stopped at the
+first closing brace, which for a matrix answer is the one inside
+`\begin{bmatrix}`:
+
+```
+\boxed{A^T = \begin{bmatrix} 1 & 2 \end{bmatrix}}
+   ->  "\begin{bmatrix"
+```
+
+That was 420 of the 660 problems — matrix-valued answers, and the ones
+labelled `\text{rank}(A) = 3` where the first brace belongs to `\text{`.
+Sixty-four per cent of the benchmark was unscoreable, whatever the model did.
+
+**And the label came off the reference but not off the model's answer.** A
+base model answers `\det(A) = 97` inside the box. The reference had its
+label stripped; the model's answer did not, so the answer grammar never saw
+a value. The baseline would have scored zero on every determinant.
+
+Both the reference and the model's answer now go through the same
+normalisation, and `\boxed{...}` is extracted with balanced braces.
+
+The check that matters is the one in
+`tests/test_benchmark_grading.py`: it downloads the 660 problems and
+asserts that every reference answer parses, that a correct answer scores
+correct in all three shapes a model might write it in, and that a wrong
+answer scores wrong. Invented test data would not have caught any of these
+three bugs.
+
+### The numbers it produces
+
 `make bench-all` scores the adapter on all 660 LinAlg-Bench problems and
 prints the result next to the published table, with the base model scored on
 the same problems as a baseline.
+
+The base model is prompted in this project's format, which is not the format
+the published numbers were obtained in — the published table asked for the
+answer inside `\boxed{}` in the benchmark's own phrasing. Treat the base
+score as the strict weights-only comparison and the published table as the
+reference point, and do not read the base score as "what the base model would
+score on the benchmark".
 
 The comparison worth making is **against the base model**, not against the
 frontier models. The frontier table is there to show where the difficulty

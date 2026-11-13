@@ -36,11 +36,19 @@ import time
 import urllib.request
 
 from .answer import answers_equal, parse_answer
+from .grading import extract_model_answer, normalise_reference
 from .inference import generate, load_model, parse_completion
 
 # Accuracy on LinAlg-Bench by matrix size, as published in the benchmark's
 # own results (mst-ai/linalg-bench-llm, results/accuracy/). These are the
 # numbers a local 1.7B model should be measured against.
+# LinAlg-Bench writes the eigenvalues rounded to four decimal places, so the
+# reference and the true value differ by up to 5e-5. Comparing at the default
+# tolerance of 1e-9 would score a correct eigenvalue wrong. Measured over the
+# 660 problems: the largest gap for the eigenvalues is 4.991e-05, and for
+# every other task it is exactly zero.
+BENCH_TOL = 1e-3
+
 PUBLISHED_LINALG = {
     "OpenAI-o1": (94.6, 92.3, 81.4),
     "Gemini-3.1-Pro": (93.7, 94.6, 88.0),
@@ -103,39 +111,6 @@ def fetch_linalg(cache_dir: str = "bench_cache") -> list[dict]:
     return problems
 
 
-def normalise_reference(answer: str) -> str:
-    """Strip the prose around a benchmark's reference answer.
-
-    The benchmark writes answers like "det(A) = 5" or
-    "\\lambda_1 = 1, \\lambda_2 = 2". Only the values are wanted.
-    """
-    a = answer.strip()
-    a = re.sub(r"\\boxed\{(.*)\}", r"\1", a, flags=re.S)
-    # drop a leading label such as "det(A) = " or "x = "
-    m = re.match(r"^[^=]{1,24}=\s*(.+)$", a, flags=re.S)
-    if m and "=" not in m.group(1):
-        a = m.group(1).strip()
-    a = a.rstrip(".")
-    return a
-
-
-def extract_model_answer(raw: str) -> str:
-    """Pull the model's answer out of a completion, whatever shape it took.
-
-    The fine-tuned model uses the ### Answer block. A base model does not, so
-    fall back to the last \\boxed{} and then to the last line that looks like
-    an answer.
-    """
-    parsed = parse_completion(raw)
-    if parsed["answer"].strip():
-        return parsed["answer"].strip()
-    m = re.findall(r"\\boxed\{(.*?)\}", raw, flags=re.S)
-    if m:
-        return m[-1].strip()
-    lines = [l.strip() for l in raw.strip().split("\n") if l.strip()]
-    return lines[-1] if lines else ""
-
-
 def score(problems: list[dict], outs: list[str]) -> dict:
     """Grade against the benchmark's own ground truth, using sympy."""
     per_size: dict[str, list[int]] = {}
@@ -147,7 +122,9 @@ def score(problems: list[dict], outs: list[str]) -> dict:
         ok = False
         if got:
             try:
-                ok = answers_equal(parse_answer(got), parse_answer(normalise_reference(p["answer"])))
+                ok = answers_equal(parse_answer(got),
+                                   parse_answer(normalise_reference(p["answer"])),
+                                   tol=BENCH_TOL)
             except Exception:
                 ok = False
         else:

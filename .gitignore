@@ -12,3 +12,6 @@ venv/
 .env
 *.egg-info/
 .pytest_cache/
+
+# the LinAlg-Bench CSVs the grading test downloads
+tests/_cache/
