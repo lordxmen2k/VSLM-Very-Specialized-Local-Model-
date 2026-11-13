@@ -112,6 +112,27 @@ class TestBenchmarkGrading(unittest.TestCase):
         self.assertEqual([], failures[:10],
                          f"{len(failures)} correct answers scored wrong")
 
+    def test_the_models_own_format_matches_the_benchmarks(self):
+        """The model answers in this project's format: a set for the
+        eigenvalues, a pmatrix for a matrix. The benchmark writes a bare
+        comma-separated list and a bmatrix. The two have to compare equal,
+        or every answer the model gets right is scored wrong."""
+        cases = [
+            (r"\{ -1, 0, 3 \}", r"\lambda = -1, 0, 3"),
+            (r"\begin{pmatrix} 1 & 2 \end{pmatrix}",
+             r"Ax = \begin{bmatrix} 1 & 2 \end{bmatrix}"),
+            (r"\begin{pmatrix} 1 & 2 \\ 3 & 4 \end{pmatrix}",
+             r"AB = \begin{bmatrix} 1 & 2 \\ 3 & 4 \end{bmatrix}"),
+            ("97", r"\det(A) = 97"),
+            (r"\{ 2, -1 \}", r"\lambda = 2, -1"),
+        ]
+        for model, ref in cases:
+            got = extract_model_answer("### Answer\n" + model)
+            truth = parse_answer(normalise_reference(ref))
+            self.assertTrue(answers_equal(parse_answer(got), truth, tol=1e-3),
+                            f"the model wrote {model!r} and the reference is "
+                            f"{ref!r}, but they did not compare equal")
+
     def test_a_wrong_answer_scores_wrong(self):
         """The grader must not be so loose that anything passes."""
         accepted = []
