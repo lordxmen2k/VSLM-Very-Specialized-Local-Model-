@@ -444,7 +444,9 @@ make speed-test
 Runs the same data through five micro-batch shapes and reports the cost of
 each, with the real token count of the corpus. Each shape is measured in a
 process of its own, because the caching allocator does not give back memory
-it has cached:
+it has cached, and the parent holds no GPU memory while they run. The
+`free GB` column is how much of the card was free when that row started; if
+it is not the whole card, the row is not measuring what it claims to:
 
 ```
   corpus: 2000 examples, NNN,NNN tokens, mean NNN tokens, median NNN, p95 NNN, max NNN

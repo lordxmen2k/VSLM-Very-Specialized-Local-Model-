@@ -112,13 +112,41 @@ if __name__ == "__main__":
     unittest.main()
 
 
+class TestSpeedTestParent(unittest.TestCase):
+    """The parent process must not hold GPU memory while the children measure.
+
+    It loads the tokenizer and spawns a process per configuration. If it also
+    loads the model, the card is shared with the parent's copy while the
+    child measures, and every row is measured against a card that is already
+    partly full. That is not a subtle effect: it turned a 4.3 GB row into a
+    9.8 GB one and made the fast configuration look like the slow one.
+    """
+
+    def test_the_speed_test_branch_comes_before_the_model_is_built(self):
+        import ast
+        tree = ast.parse(TRAIN_PY.read_text(encoding="utf-8"))
+        main = next(n for n in tree.body
+                    if isinstance(n, ast.FunctionDef) and n.name == "main")
+        speed_at = build_at = None
+        for i, node in enumerate(main.body):
+            if isinstance(node, ast.If) and "args.speed_test" in ast.unparse(node.test):
+                speed_at = i
+            if isinstance(node, ast.Assign) and "build_model" in ast.unparse(node):
+                build_at = i
+        self.assertIsNotNone(speed_at, "main() has no --speed-test branch")
+        self.assertIsNotNone(build_at, "main() never builds the model")
+        self.assertLess(speed_at, build_at,
+                        "the speed test must return before the model is built, "
+                        "or the parent holds the GPU while its children measure")
+
+
 class TestSpeedRowParsing(unittest.TestCase):
     """The speed test measures each configuration in its own process and
     reads the row back over stdout, so the row format has to round-trip."""
 
     def test_a_row_parses(self):
         from la.speed import format_row, parse_speed_row
-        line = format_row(2, 8, 4.25, 1454.0, 0.5, 6.41, 10.86)
+        line = format_row(2, 8, 4.25, 1454.0, 0.5, 6.41, 10.86, 12.88)
         row = parse_speed_row(line)
         self.assertIsNotNone(row)
         self.assertFalse(row["oom"])
@@ -129,6 +157,7 @@ class TestSpeedRowParsing(unittest.TestCase):
         self.assertAlmostEqual(1454.0, row["tok_s"])
         self.assertAlmostEqual(6.41, row["alloc"])
         self.assertAlmostEqual(10.86, row["resv"])
+        self.assertAlmostEqual(12.88, row["free_start"])
 
     def test_an_oom_row_parses(self):
         from la.speed import parse_speed_row

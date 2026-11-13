@@ -636,8 +636,31 @@ machine-readable row back over stdout. The row format is a contract between
 the two processes, so it lives in `la/speed.py` and is unit tested without a
 GPU.
 
+**And then the fix introduced a second contamination.** The parent process
+loaded the model onto the GPU before it spawned the children, because that
+was where the model-loading code already was. So the card was shared with
+the parent's copy of the model while the child measured, and every row was
+measured against a card that was already partly full. The tell was a batch-1
+row reporting 9.76 GB allocated where the same configuration had measured
+4.29 GB in the previous, in-process version.
+
+The parent now loads only the tokenizer and returns before the model is
+built. There is a test that asserts the ordering, because it is exactly the
+kind of thing that gets undone by a well-meaning refactor.
+
+Two more things the tool had to get right:
+
+- **The free VRAM at the start of each measurement is reported.** If the card
+  is not free when a row begins, the row is not measuring what it claims to.
+  The parent's own free memory is printed before it spawns anything, with a
+  warning if the card is already more than 10 % in use.
+- **The shuffle is fixed.** The width of a batch decides how wide its logits
+  are, and the logits are the dominant memory term, so an unlucky draw can
+  change a row's peak memory by more than half. Every configuration now sees
+  the same examples in the same order, so the rows are comparable.
+
 Three separate times on this project a measurement was confounded — by a
-shared GPU, by a wrong model of the hardware, and now by the measuring
+shared GPU, by a wrong model of the hardware, and now twice by the measuring
 apparatus itself. The common thread is that a number is not a measurement
 until you know what else was running.
 

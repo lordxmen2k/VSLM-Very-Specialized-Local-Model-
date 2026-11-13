@@ -192,8 +192,18 @@ def speed_one(args, rows, tok, model, optim, pad_id, bs: int, ga: int) -> dict:
     Measuring several shapes in one process therefore measures the sum of
     them, not each one.
     """
+    free_start = 0.0
+    if torch.cuda.is_available():
+        free, _total = torch.cuda.mem_get_info()
+        free_start = free / 1e9
     ds = ProblemDataset(rows, tok, args.max_seq_len)
-    dl = DataLoader(ds, batch_size=bs, shuffle=True,
+    # a fixed shuffle, so every configuration sees the same examples in the
+    # same order. The width of a batch decides how wide its logits are, and
+    # the logits are the dominant memory term, so an unlucky draw can change
+    # a row's peak memory by more than half.
+    generator = torch.Generator()
+    generator.manual_seed(0)
+    dl = DataLoader(ds, batch_size=bs, shuffle=True, generator=generator,
                     collate_fn=lambda b: collate(b, pad_id))
     optim.zero_grad(set_to_none=True)
     if torch.cuda.is_available():
@@ -238,7 +248,7 @@ def speed_one(args, rows, tok, model, optim, pad_id, bs: int, ga: int) -> dict:
         resv = torch.cuda.max_memory_reserved() / 1e9
     else:
         alloc = resv = 0.0
-    return {"bs": bs, "ga": ga, "oom": False,
+    return {"bs": bs, "ga": ga, "oom": False, "free_start": free_start,
             "s_step": el / steps, "tok_s": tok_n / max(el, 1e-9),
             "ex_s": ex_n / max(el, 1e-9), "alloc": alloc, "resv": resv}
 
@@ -281,9 +291,18 @@ def speed_test(args, rows, tok, pad_id) -> int:
         print("  truncation: none")
     card = torch.cuda.get_device_properties(0).total_memory / 1e9 \
         if torch.cuda.is_available() else 0.0
+    if torch.cuda.is_available():
+        free, _total = torch.cuda.mem_get_info()
+        free_gb = free / 1e9
+        print(f"  card free at the start: {free_gb:.2f} GB of {card:.2f} GB")
+        if free_gb < card * 0.9:
+            print("  WARNING: the card is already partly in use. Close anything")
+            print("  that holds GPU memory, or the rows below are measured")
+            print("  against a card that is not free.")
     print()
     print(f"  {'batch':>6}{'accum':>7}{'eff':>5}{'s/step':>9}"
-          f"{'tok/s':>10}{'ex/s':>8}{'alloc GB':>10}{'resv GB':>9}{'frag':>7}")
+          f"{'tok/s':>10}{'ex/s':>8}{'alloc GB':>10}{'resv GB':>9}"
+          f"{'frag':>7}{'free GB':>9}")
 
     for bs, ga in configs:
         cmd = [sys.executable, "-m", "la.train",
@@ -318,7 +337,7 @@ def speed_test(args, rows, tok, pad_id) -> int:
               f"{parsed['s_step']:>9.2f}{parsed['tok_s']:>10,.0f}"
               f"{parsed['ex_s']:>8.1f}{parsed['alloc']:>10.2f}"
               f"{parsed['resv']:>9.2f}{parsed['resv']-parsed['alloc']:>7.2f}"
-              + over)
+              f"{parsed.get('free_start', 0.0):>9.2f}" + over)
 
     print()
     if card:
@@ -434,6 +453,17 @@ def main(argv=None) -> int:
                  ("dataloader workers", args.num_workers)):
         print(f"  {k:<18} {v}")
 
+    # The speed test measures in child processes. The parent must not put the
+    # model on the GPU: if it does, the card is shared with the parent's
+    # copy of the model while the child measures, and every row is measured
+    # against a card that is already partly full.
+    if args.speed_test:
+        from transformers import AutoTokenizer
+        tok = AutoTokenizer.from_pretrained(args.base, trust_remote_code=True)
+        if tok.pad_token is None:
+            tok.pad_token = tok.eos_token
+        return speed_test(args, rows[: args.limit or 2000], tok, tok.pad_token_id)
+
     tok, model = build_model(args.base, None, args.rank, args.alpha,
                               load_4bit=want_4bit)
     ds = ProblemDataset(rows, tok, args.max_seq_len)
@@ -472,11 +502,9 @@ def main(argv=None) -> int:
             print(format_oom())
         else:
             print(format_row(row["bs"], row["ga"], row["s_step"], row["tok_s"],
-                             row["ex_s"], row["alloc"], row["resv"]))
+                             row["ex_s"], row["alloc"], row["resv"],
+                             row.get("free_start", 0.0)))
         return 0
-
-    if args.speed_test:
-        return speed_test(args, rows[: args.limit or 2000], tok, tok.pad_token_id)
 
     os.makedirs(args.out, exist_ok=True)
     model.train()

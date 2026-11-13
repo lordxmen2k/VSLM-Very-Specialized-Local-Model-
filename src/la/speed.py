@@ -20,10 +20,15 @@ SPEED_CONFIGS = [(1, 16), (2, 8), (4, 4), (8, 2), (16, 1)]
 
 
 def format_row(bs: int, ga: int, s_step: float, tok_s: float, ex_s: float,
-               alloc: float, resv: float) -> str:
-    """The line a measuring process prints."""
+               alloc: float, resv: float, free_start: float = 0.0) -> str:
+    """The line a measuring process prints.
+
+    free_start is how much of the card was free when the measurement began.
+    It is the check that the card was not already partly full - by another
+    process, or by a parent that loaded the model and did not let go of it.
+    """
     return (f"{SPEED_ROW_PREFIX}|{bs}|{ga}|{bs * ga}|{s_step:.4f}|{tok_s:.1f}"
-            f"|{ex_s:.4f}|{alloc:.4f}|{resv:.4f}")
+            f"|{ex_s:.4f}|{alloc:.4f}|{resv:.4f}|{free_start:.4f}")
 
 
 def format_oom() -> str:
@@ -42,6 +47,7 @@ def parse_speed_row(line: str | None) -> dict | None:
                 "bs": int(parts[1]), "ga": int(parts[2]), "eff": int(parts[3]),
                 "s_step": float(parts[4]), "tok_s": float(parts[5]),
                 "ex_s": float(parts[6]), "alloc": float(parts[7]),
-                "resv": float(parts[8])}
+                "resv": float(parts[8]),
+                "free_start": float(parts[9]) if len(parts) > 9 else 0.0}
     except (IndexError, ValueError):
         return None
