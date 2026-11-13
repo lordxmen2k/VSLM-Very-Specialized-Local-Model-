@@ -22,6 +22,7 @@ WORKERS ?= 4
 BASE ?= Qwen/Qwen3-1.7B-Base
 ADAPTER ?= runs/vslm
 DATA ?= data
+RESULTS ?= data/results.jsonl
 
 # Extra flags for the individual targets:
 #   make train TRAIN_ARGS="--max-steps 20 --limit 500"
@@ -98,6 +99,10 @@ test:
 # check that every printed derivation evaluates to its own answer
 check-arithmetic:
 	$(PYTHON) -m la.check_arithmetic --n 200
+
+# say what the model actually wrote for the questions it got wrong
+explain:
+	$(PYTHON) -m la.explain $(RESULTS)
 
 # measure the cost of five batch shapes on the same data
 speed-test:
