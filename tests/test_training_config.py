@@ -110,3 +110,31 @@ class TestDatasetIsTokenisedOnce(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestSpeedRowParsing(unittest.TestCase):
+    """The speed test measures each configuration in its own process and
+    reads the row back over stdout, so the row format has to round-trip."""
+
+    def test_a_row_parses(self):
+        from la.speed import format_row, parse_speed_row
+        line = format_row(2, 8, 4.25, 1454.0, 0.5, 6.41, 10.86)
+        row = parse_speed_row(line)
+        self.assertIsNotNone(row)
+        self.assertFalse(row["oom"])
+        self.assertEqual(2, row["bs"])
+        self.assertEqual(8, row["ga"])
+        self.assertEqual(16, row["eff"])
+        self.assertAlmostEqual(4.25, row["s_step"])
+        self.assertAlmostEqual(1454.0, row["tok_s"])
+        self.assertAlmostEqual(6.41, row["alloc"])
+        self.assertAlmostEqual(10.86, row["resv"])
+
+    def test_an_oom_row_parses(self):
+        from la.speed import parse_speed_row
+        self.assertEqual({"oom": True}, parse_speed_row("SPEEDROW|oom"))
+
+    def test_junk_does_not_parse(self):
+        from la.speed import parse_speed_row
+        for bad in (None, "", "not a row", "SPEEDROW|2|8", "SPEEDROW|x|y|z"):
+            self.assertIsNone(parse_speed_row(bad))

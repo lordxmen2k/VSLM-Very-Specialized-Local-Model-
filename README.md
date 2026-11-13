@@ -305,7 +305,7 @@ through five micro-batch shapes at the same effective batch of 16:
 
 ```
    batch  accum  eff   s/step     tok/s    ex/s  alloc GB  resv GB   frag
-       1     16   16     6.87       814     0.1      3.68     4.33   0.66
+       1     16   16     6.46       814     0.1      3.68     4.33   0.66
        2      8   16     3.58     1,633     0.6      5.04     7.45   2.41
        4      4   16    24.40       231     0.2      7.78    13.68   5.90
        8      2   16    36.36       169     0.2    13.24    26.12  12.88
@@ -319,15 +319,27 @@ forces the caching allocator to spill into host memory mapped into the device
 address space, and every access to that crosses PCIe.
 
 So the rule is: **take the fastest row whose reserved memory stays under the
-card.** That is batch 2 with 8-way accumulation, at 1,633 tokens per second —
-twice as fast as batch 1, and seven times faster than batch 4.
+card.** That is batch 2 with 8-way accumulation — twice as fast as batch 1,
+and seven times faster than batch 4.
 
-**The training budget, from that measurement.** The corpus is 20,000
-examples at a mean of 329 tokens — 6.6 M tokens per epoch — after the
-duplication described below was removed. At 1,454 tokens per second that is
-**about 75 minutes per epoch**, or 1,250 optimiser steps at 4.25 s each,
-which is the same number by another route. Two epochs is about two and a
-half hours.
+That table is also a lesson about measuring. The first version of the speed
+test ran all five shapes in one process, and the caching allocator carried
+its fragmentation from one to the next, so the later rows were measured
+through the earlier ones' mess. The numbers above came from that version;
+the `alloc` column is stable across runs and the `resv` and `tok/s` columns
+are not. **The tool now runs each shape in a process of its own**, and the
+reserved figure it reports is the real one.
+
+**The corpus, measured.** 20,000 examples at a mean of 324 tokens, which is
+6.5 M tokens per epoch. 1.0 % of them are longer than the 768-token cap and
+are truncated — down from 2.9 % before the duplication was removed.
+
+**The training budget.** One epoch is somewhere between **75 and 130
+minutes**, depending on how much of the card the run holds. The two
+measurements that bracket it are 1,454 and 818 tokens per second for the same
+configuration; the clean instrument will settle which one is real. Plan
+against the pessimistic end. Two epochs is between two and a half hours and
+four and a half hours.
 
 Only 1.99 % of the parameters are trainable: 34,865,152 LoRA parameters
 against 1,755,440,128 in total. The frozen base is never updated.
@@ -430,7 +442,9 @@ make speed-test
 ```
 
 Runs the same data through five micro-batch shapes and reports the cost of
-each, with the real token count of the corpus:
+each, with the real token count of the corpus. Each shape is measured in a
+process of its own, because the caching allocator does not give back memory
+it has cached:
 
 ```
   corpus: 2000 examples, NNN,NNN tokens, mean NNN tokens, median NNN, p95 NNN, max NNN
@@ -442,7 +456,9 @@ each, with the real token count of the corpus:
 Read it one way or the other. If `s/step` is flat across the rows, the cost
 is per token and the levers are fewer tokens or fewer examples, not a
 different batch shape. If it falls steeply, the micro-batch shape was the
-problem.
+problem. A row marked `OVER THE CARD` has passed the card's physical memory
+and is running over PCIe; the `frag` column shows how much of the reserved
+memory is fragmentation rather than live data.
 
 ### Train
 

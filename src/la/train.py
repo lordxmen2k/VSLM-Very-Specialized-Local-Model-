@@ -18,6 +18,7 @@ import argparse
 import json
 import math
 import os
+import subprocess
 import random
 import sys
 import time
@@ -178,22 +179,81 @@ def cosine_lr(step: int, total: int, warmup: int, peak: float) -> float:
     return peak * 0.5 * (1.0 + math.cos(math.pi * min(1.0, prog)))
 
 
-def speed_test(args, rows, tok, model, optim, pad_id) -> int:
-    """Run the same data through several batch shapes and report the cost.
+def speed_one(args, rows, tok, model, optim, pad_id, bs: int, ga: int) -> dict:
+    """Run one micro-batch shape and report what it cost.
 
-    Batch 1 with 16-way accumulation measured 9.0 s per optimiser step, and
-    batch 4 with 4-way accumulation measured about the same, so the cost is
-    not per example and batching alone does not fix it. This measures where
-    it actually goes: the same effective batch of 16 at five different
-    micro-batch sizes, plus the real token count of the corpus.
-
-    Every configuration is the same effective batch, so every configuration
-    sees the same number of examples per optimiser step. If the time per
-    step barely moves, the cost is per token and the only levers are fewer
-    tokens or fewer examples. If it moves a lot, the micro-batch shape was
-    the problem.
+    Called in a process of its own. The caching allocator does not give back
+    memory it has cached, and it cannot always reuse a block for a request
+    of a different size, so a process that has already run a wider
+    configuration measures the next one through its own fragmentation.
+    Measuring several shapes in one process therefore measures the sum of
+    them, not each one.
     """
-    configs = [(1, 16), (2, 8), (4, 4), (8, 2), (16, 1)]
+    ds = ProblemDataset(rows, tok, args.max_seq_len)
+    dl = DataLoader(ds, batch_size=bs, shuffle=True,
+                    collate_fn=lambda b: collate(b, pad_id))
+    optim.zero_grad(set_to_none=True)
+    if torch.cuda.is_available():
+        torch.cuda.reset_peak_memory_stats()
+    warm, measure = 2, 5
+    micro = step = 0
+    cur_tok = 0
+    tok_n = ex_n = 0
+    t0 = time.time()
+    try:
+        for batch in dl:
+            batch = {k: v.to(model.device) for k, v in batch.items()}
+            cur_tok += int(batch["attention_mask"].sum().item())
+            out = model(**batch)
+            (out.loss / ga).backward()
+            micro += 1
+            if micro % ga:
+                continue
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            optim.step()
+            optim.zero_grad(set_to_none=True)
+            step += 1
+            if step == warm:
+                if torch.cuda.is_available():
+                    torch.cuda.synchronize()
+                t0 = time.time()
+            elif step > warm:
+                tok_n += cur_tok
+                ex_n += bs
+            cur_tok = 0
+            if step >= warm + measure:
+                break
+    except torch.cuda.OutOfMemoryError:
+        torch.cuda.empty_cache()
+        return {"bs": bs, "ga": ga, "oom": True}
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+    el = time.time() - t0
+    steps = max(1, step - warm)
+    if torch.cuda.is_available():
+        alloc = torch.cuda.max_memory_allocated() / 1e9
+        resv = torch.cuda.max_memory_reserved() / 1e9
+    else:
+        alloc = resv = 0.0
+    return {"bs": bs, "ga": ga, "oom": False,
+            "s_step": el / steps, "tok_s": tok_n / max(el, 1e-9),
+            "ex_s": ex_n / max(el, 1e-9), "alloc": alloc, "resv": resv}
+
+
+def speed_test(args, rows, tok, pad_id) -> int:
+    """Measure the cost of several micro-batch shapes, each in its own process.
+
+    Every shape is the same effective batch of 16, so every shape sees the
+    same number of examples per optimiser step. If the time per step barely
+    moves, the cost is per token and the levers are fewer tokens or fewer
+    examples. If it moves a lot, the micro-batch shape was the problem.
+
+    The shapes are measured in separate processes because the caching
+    allocator carries its fragmentation from one to the next. Measuring them
+    in one process gives a different answer each time it is run, which is
+    the giveaway that the instrument is measuring the wrong thing.
+    """
+    configs = SPEED_CONFIGS
     print("\n" + "=" * 72)
     print("  speed test")
     print("=" * 72)
@@ -222,59 +282,41 @@ def speed_test(args, rows, tok, model, optim, pad_id) -> int:
     print(f"  {'batch':>6}{'accum':>7}{'eff':>5}{'s/step':>9}"
           f"{'tok/s':>10}{'ex/s':>8}{'alloc GB':>10}{'resv GB':>9}{'frag':>7}")
 
-    model.train()
     for bs, ga in configs:
-        ds = ProblemDataset(rows, tok, args.max_seq_len)
-        dl = DataLoader(ds, batch_size=bs, shuffle=True,
-                        collate_fn=lambda b: collate(b, pad_id))
-        optim.zero_grad(set_to_none=True)
-        if torch.cuda.is_available():
-            torch.cuda.reset_peak_memory_stats()
-        warm, measure = 2, 5
-        micro = step = 0
-        cur_tok = 0
-        tok_n = ex_n = 0
-        t0 = time.time()
+        cmd = [sys.executable, "-m", "la.train",
+               "--speed-config", str(bs), str(ga),
+               "--base", args.base, "--data", args.data, "--out", args.out,
+               "--max-seq-len", str(args.max_seq_len),
+               "--rank", str(args.rank), "--alpha", str(args.alpha),
+               "--precision", args.precision]
+        if args.limit:
+            cmd += ["--limit", str(args.limit)]
         try:
-            for batch in dl:
-                batch = {k: v.to(model.device) for k, v in batch.items()}
-                cur_tok += int(batch["attention_mask"].sum().item())
-                out = model(**batch)
-                (out.loss / ga).backward()
-                micro += 1
-                if micro % ga:
-                    continue
-                torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-                optim.step()
-                optim.zero_grad(set_to_none=True)
-                step += 1
-                if step == warm:
-                    if torch.cuda.is_available():
-                        torch.cuda.synchronize()
-                    t0 = time.time()
-                elif step > warm:
-                    tok_n += cur_tok
-                    ex_n += bs
-                cur_tok = 0
-                if step >= warm + measure:
-                    break
-        except torch.cuda.OutOfMemoryError:
-            print(f"  {bs:>6}{ga:>7}{bs*ga:>5}   out of memory")
-            torch.cuda.empty_cache()
+            proc = subprocess.run(cmd, capture_output=True, text=True,
+                                  timeout=1800)
+        except subprocess.TimeoutExpired:
+            print(f"  {bs:>6}{ga:>7}{bs*ga:>5}   timed out")
             continue
-        if torch.cuda.is_available():
-            torch.cuda.synchronize()
-        el = time.time() - t0
-        steps = max(1, step - warm)
-        if torch.cuda.is_available():
-            alloc = torch.cuda.max_memory_allocated() / 1e9
-            resv = torch.cuda.max_memory_reserved() / 1e9
-        else:
-            alloc = resv = 0.0
-        print(f"  {bs:>6}{ga:>7}{bs*ga:>5}{el/steps:>9.2f}"
-              f"{tok_n/max(el,1e-9):>10,.0f}{ex_n/max(el,1e-9):>8.1f}"
-              f"{alloc:>10.2f}{resv:>9.2f}{resv-alloc:>7.2f}"
-              + ("   OVER THE CARD" if card and resv > card else ""))
+        row = None
+        for line in proc.stdout.splitlines():
+            if line.startswith(SPEED_ROW_PREFIX):
+                row = line
+        parsed = parse_speed_row(row)
+        if parsed is None:
+            err = (proc.stderr or proc.stdout).strip().splitlines()
+            detail = err[-1][:60] if err else "no output"
+            print(f"  {bs:>6}{ga:>7}{bs*ga:>5}   failed: {detail}")
+            continue
+        if parsed.get("oom"):
+            print(f"  {bs:>6}{ga:>7}{bs*ga:>5}   out of memory")
+            continue
+        over = "   OVER THE CARD" if card and parsed["resv"] > card else ""
+        print(f"  {parsed['bs']:>6}{parsed['ga']:>7}{parsed['eff']:>5}"
+              f"{parsed['s_step']:>9.2f}{parsed['tok_s']:>10,.0f}"
+              f"{parsed['ex_s']:>8.1f}{parsed['alloc']:>10.2f}"
+              f"{parsed['resv']:>9.2f}{parsed['resv']-parsed['alloc']:>7.2f}"
+              + over)
+
     print()
     if card:
         print(f"  the card has {card:.2f} GB. A configuration whose reserved")
@@ -330,6 +372,9 @@ def main(argv=None) -> int:
     ap.add_argument("--speed-test", action="store_true",
                     help="run the same data through five batch shapes and "
                          "report the cost of each, then exit")
+    ap.add_argument("--speed-config", type=int, nargs=2, metavar=("BATCH", "ACCUM"),
+                    help="internal: measure one batch shape in this process "
+                         "and print one machine-readable row")
     args = ap.parse_args(argv)
 
     random.seed(args.seed)
@@ -416,10 +461,19 @@ def main(argv=None) -> int:
                                   weight_decay=0.01)
     print(f"optimiser: {opt_name}")
 
+    if args.speed_config:
+        # one configuration, in this process, so the allocator starts clean
+        row = speed_one(args, rows, tok, model, optim, tok.pad_token_id,
+                         args.speed_config[0], args.speed_config[1])
+        if row["oom"]:
+            print(format_oom())
+        else:
+            print(format_row(row["bs"], row["ga"], row["s_step"], row["tok_s"],
+                             row["ex_s"], row["alloc"], row["resv"]))
+        return 0
+
     if args.speed_test:
-        # the same optimiser the real run uses, so the comparison is fair
-        return speed_test(args, rows[: args.limit or 2000], tok, model, optim,
-                          tok.pad_token_id)
+        return speed_test(args, rows[: args.limit or 2000], tok, tok.pad_token_id)
 
     os.makedirs(args.out, exist_ok=True)
     model.train()

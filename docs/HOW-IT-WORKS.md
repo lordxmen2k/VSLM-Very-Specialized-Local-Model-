@@ -559,6 +559,31 @@ step-time variance to "a slow GPU" when the real cause was a shared GPU. The
 speed test exists now because of that, and it prints the reserved figure and
 flags any row that crosses the card.
 
+### The instrument that was measuring the wrong thing
+
+The speed test ran all five micro-batch shapes in a single process, and
+reported the result. The result changed every time it was run, and it
+changed in a way that should not have been possible: after the corpus got
+*smaller*, one configuration measured *slower* and its reserved memory went
+*up*.
+
+The allocated-memory column was stable across runs. The reserved column was
+not. The difference is fragmentation: the caching allocator does not give
+back memory it has cached, and it cannot always reuse a block for a request
+of a different size, so a process that has already run a wider configuration
+measures the next one through its own mess. Measuring several shapes in one
+process measures the sum of them, not each one.
+
+The tool now runs each shape in a process of its own and reads one
+machine-readable row back over stdout. The row format is a contract between
+the two processes, so it lives in `la/speed.py` and is unit tested without a
+GPU.
+
+Three separate times on this project a measurement was confounded — by a
+shared GPU, by a wrong model of the hardware, and now by the measuring
+apparatus itself. The common thread is that a number is not a measurement
+until you know what else was running.
+
 ### The step times that would not settle
 
 Step times swinging between 11 and 32 seconds with no trend looked like a
