@@ -81,12 +81,19 @@ class TestScratchpadArithmetic(unittest.TestCase):
         import sympy as sp
         rng = random.Random(7)
         seen = 0
-        while seen < 40:
+        tries = 0
+        # every loop that hunts for a matching example is capped, so a
+        # change to the shape of a scratchpad can never turn into a hang
+        while seen < 40 and tries < 2400:
+            tries += 1
             p = GENERATORS["determinant"](rng)
             if p is None:
                 continue
-            line = p.scratchpad.splitlines()[1]
-            if "expand along the first row" not in line:
+            # search every line, not a fixed index: the derivation now
+            # computes the minors before it expands along the first row
+            line = next((l for l in p.scratchpad.splitlines()
+                         if "expand along the first row" in l), None)
+            if line is None:
                 continue
             seen += 1
             expr = line.split("det(A) = ", 1)[1].rsplit(" = ", 1)[0]

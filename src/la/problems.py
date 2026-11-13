@@ -115,6 +115,18 @@ def _permute_rows_only(rng: random.Random, A):
     return sp.Matrix(A[order, :])
 
 
+def _exact(x):
+    """Clean a value cheaply.
+
+    sp.nsimplify searches for a closed form and is slow - around a quarter
+    of a second on a fraction like 25/3. The arithmetic in the generators
+    is already exact, so it only needs to run on floats.
+    """
+    if isinstance(x, sp.Float):
+        return _exact(x)
+    return x
+
+
 def _fmt_sum(values) -> str:
     """A sum of numbers, with the signs written the way a person would.
 
@@ -151,13 +163,22 @@ def _dot_product(row, col) -> str:
         if bv.startswith("-"):
             bv = f"({bv})"
         terms.append(f"{av}*{bv}")
-        products.append(sp.nsimplify(a * b))
-    total = sp.nsimplify(sum(products))
-    # The partial sums are left out: the terms are the hard part of the
-    # line, and writing them all out doubles the length of every matrix
-    # example in the corpus. It also makes the arithmetic checker validate
-    # the terms rather than a sum of them.
-    return f"{' + '.join(terms)} = {fmt_scalar(total)}"
+        products.append(_exact(a * b))
+    total = _exact(sum(products))
+    # The partial sums matter. "a*b + c*d = p + q = total" asks the model for
+    # two multiplications and two additions, each conditioned on the tokens
+    # already written; "a*b + c*d = total" asks for all four at once. The
+    # run with the sums removed scored 27 per cent on matrix multiplication
+    # and 0 per cent on matrix powers, and the failures were exactly the
+    # long dot products. It also makes the arithmetic checker validate the
+    # terms rather than a sum of them.
+    running = []
+    acc = sp.Integer(0)
+    for prod in products:
+        acc = _exact(acc + prod)
+        running.append(acc)
+    return (f"{' + '.join(terms)} = {_fmt_sum(products)}"
+            f" = {fmt_scalar(total)}")
 
 
 def _doolittle(A):
@@ -168,7 +189,7 @@ def _doolittle(A):
     the multiplier came from, so the derivation can show the division.
     """
     n = A.rows
-    data = [[sp.nsimplify(A[i, j]) for j in range(n)] for i in range(n)]
+    data = [[_exact(A[i, j]) for j in range(n)] for i in range(n)]
     lower = sp.eye(n)
     trace = []
     for k in range(n):
@@ -177,12 +198,12 @@ def _doolittle(A):
         for i in range(k + 1, n):
             if data[i][k] == 0:
                 continue
-            factor = sp.nsimplify(data[i][k] / data[k][k])
+            factor = _exact(data[i][k] / data[k][k])
             lower[i, k] = factor
-            trace.append((i, factor, k, sp.nsimplify(data[i][k]),
-                          sp.nsimplify(data[k][k])))
+            trace.append((i, factor, k, _exact(data[i][k]),
+                          _exact(data[k][k])))
             for j in range(n):
-                data[i][j] = sp.nsimplify(data[i][j] - factor * data[k][j])
+                data[i][j] = _exact(data[i][j] - factor * data[k][j])
     return sp.Matrix(data), lower, trace
 
 
@@ -192,7 +213,7 @@ def _solve_by_elimination(A, b):
     Returns (echelon, trace, x, back) or None if a pivot is zero.
     """
     n = A.rows
-    aug = [[sp.nsimplify(A[i, j]) for j in range(n)] + [sp.nsimplify(b[i, 0])]
+    aug = [[_exact(A[i, j]) for j in range(n)] + [_exact(b[i, 0])]
            for i in range(n)]
     trace = []
     for k in range(n):
@@ -201,11 +222,11 @@ def _solve_by_elimination(A, b):
         for i in range(k + 1, n):
             if aug[i][k] == 0:
                 continue
-            factor = sp.nsimplify(aug[i][k] / aug[k][k])
-            trace.append((i, factor, k, sp.nsimplify(aug[i][k]),
-                          sp.nsimplify(aug[k][k])))
+            factor = _exact(aug[i][k] / aug[k][k])
+            trace.append((i, factor, k, _exact(aug[i][k]),
+                          _exact(aug[k][k])))
             for j in range(k, n + 1):
-                aug[i][j] = sp.nsimplify(aug[i][j] - factor * aug[k][j])
+                aug[i][j] = _exact(aug[i][j] - factor * aug[k][j])
     xs: list = [None] * n
     back = []
     for i in range(n - 1, -1, -1):
@@ -231,7 +252,7 @@ def _eliminate(A):
     alone, and the only sign that enters is the number of row swaps.
     """
     n = A.rows
-    data = [[sp.nsimplify(A[i, j]) for j in range(n)] for i in range(n)]
+    data = [[_exact(A[i, j]) for j in range(n)] for i in range(n)]
     swaps = 0
     trace: list[tuple[int, sp.Expr, int]] = []
     for col in range(n):
@@ -249,11 +270,11 @@ def _eliminate(A):
         for r in range(col + 1, n):
             if data[r][col] == 0:
                 continue
-            numerator = sp.nsimplify(data[r][col])
-            factor = sp.nsimplify(numerator / pv)
-            data[r] = [sp.nsimplify(data[r][j] - factor * data[col][j])
+            numerator = _exact(data[r][col])
+            factor = _exact(numerator / pv)
+            data[r] = [_exact(data[r][j] - factor * data[col][j])
                        for j in range(n)]
-            trace.append((r, factor, col, numerator, sp.nsimplify(pv)))
+            trace.append((r, factor, col, numerator, _exact(pv)))
     return sp.Matrix(data), swaps, trace
 
 
@@ -402,12 +423,22 @@ def gen_determinant(rng: random.Random) -> Problem | None:
         # sign into the element hides the pattern and leaves the model to
         # compute it - which is where the benchmark's "cofactor-locked"
         # failures come from.
+        # Each minor is computed, not asserted. The failure the run showed
+        # was in the middle term, where the cofactor sign is -1 and the
+        # minor is negative: a double negative that the model was getting
+        # wrong. Writing each minor out makes the two signs separate.
+        minors = []
         cofactors = []
         for j in range(3):
             minor = A.minor_submatrix(0, j)
             sign = 1 if j % 2 == 0 else -1
+            md = sp.simplify(minor.det())
+            minors.append(step(f"the {['first','second','third'][j]} minor is "
+                               f"{fmt_matrix(minor)} = {fmt_scalar(md)}"))
             cofactors.append(f"({sign:+d})*({fmt_scalar(A[0, j])})"
-                             f"*({fmt_scalar(sp.simplify(minor.det()))})")
+                             f"*({fmt_scalar(md)})")
+        for m in minors:
+            steps.append(m)
         steps.append(step("expand along the first row, with the cofactor signs "
                           "+1, -1, +1: det(A) = "
                           + " + ".join(cofactors) + f" = {fmt_scalar(det)}"))
@@ -415,7 +446,7 @@ def gen_determinant(rng: random.Random) -> Problem | None:
         # elimination by row addition: the determinant is unchanged, and the
         # only sign is the number of row interchanges
         U, swaps, trace = _eliminate(A)
-        diag = [sp.nsimplify(U[i, i]) for i in range(n)]
+        diag = [_exact(U[i, i]) for i in range(n)]
         if any(d == 0 for d in diag):
             return None
         steps.append(step("eliminate below each pivot by adding a multiple "
@@ -427,16 +458,25 @@ def gen_determinant(rng: random.Random) -> Problem | None:
                          f"({fmt_scalar(factor)}) * row {col + 1}")
         if len(trace) > 8:
             steps.append(f"  ... and {len(trace) - 8} more eliminations")
-        prod = sp.nsimplify(sp.prod(diag))
-        factors = [fmt_scalar(d) for d in diag]
+        prod = _exact(sp.prod(diag))
+        nums = [_exact(d) for d in diag]
         if swaps % 2:
-            factors[0] = "-" + factors[0]
+            nums[0] = -nums[0]
+        factors = [fmt_scalar(d) for d in nums]
         steps.append(step("the upper triangular form has diagonal "
                           + ", ".join(fmt_scalar(d) for d in diag)
                           + (f", with {swaps} row interchange"
                              f"{'s' if swaps != 1 else ''}" if swaps else "")))
-        steps.append(step("det(A) = " + " * ".join(factors)
-                          + f" = {fmt_scalar(det)}"))
+        # the product of the diagonal, one multiplication at a time
+        chain = []
+        acc = sp.Integer(1)
+        for v in nums:
+            nxt = _exact(acc * v)
+            chain.append(f"{fmt_scalar(acc)} * {fmt_scalar(v)} = {fmt_scalar(nxt)}")
+            acc = nxt
+        steps.append(step("det(A) = " + " * ".join(factors)))
+        steps.append(step("which is " + ", then ".join(chain)
+                          + f", so det(A) = {fmt_scalar(det)}"))
     steps.append(step(f"VERIFY the determinant of the same matrix is {fmt_scalar(det)}. OK"))
     scratch = "\n".join(steps)
     spec = {"kind": "matrix_heatmap",
