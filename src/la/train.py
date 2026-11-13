@@ -26,6 +26,9 @@ import time
 import torch
 from torch.utils.data import Dataset, DataLoader
 
+from .speed import (SPEED_CONFIGS, SPEED_ROW_PREFIX, format_oom, format_row,
+                     parse_speed_row)
+
 IGNORE = -100
 
 
