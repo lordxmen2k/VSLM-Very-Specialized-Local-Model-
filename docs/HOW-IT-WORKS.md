@@ -547,23 +547,67 @@ shows how each multiplier was found:
   the multiplier for row 2 is (-3)/(-2) = 3/2, so row 2 -= (3/2) * row 1
 ```
 
+### The other six families
+
+The same defect was in the six families that are not benchmark tasks, and
+they were fixed the same way:
+
+| family | before | after |
+|---|---|---|
+| `solve_system` | `x = A^{-1} b = <the inverse> <b> = <x>` | the elimination on the augmented matrix, then the back substitution, one line each |
+| `least_squares` | `x = (A^T A)^{-1} A^T b = <x>` | AᵀA, Aᵀb, and the two dot products of the final solve |
+| `lu_factor` | `L = <L> and U = <U>` | the elimination, with the multiplier and the entries it came from |
+| `condition_number` | `the singular values of A are ...` | AᵀA, its eigenvalues, and the square roots that are the singular values |
+| `orthonormal_basis` | `w1 = v1 gives w1 = <a unit vector>` | the unnormalised wᵢ, the coefficient of each earlier qⱼ, and the rescaling |
+| `projection` | `proj = (<v,w>/<w,w>) w = <v>` | the ratio, then each component's product |
+
+The orthonormalisation fix also corrected a labelling error. The corpus
+printed the *normalised* vector and called it wᵢ, which taught the model that
+v₁ is already a unit vector. It now shows the unnormalised wᵢ, the
+coefficient of each earlier qⱼ, and the division that produces qᵢ.
+
+Two more defects came out of this work, both caught by the arithmetic
+checker rather than by any test:
+
+- the `condition_number` line divided two singular values rounded to six
+  significant figures and stated the quotient rounded to six significant
+  figures, which are not equal. The checker now compares with a relative
+  tolerance, because the corpus deliberately states rounded values.
+- the `solve_system` back substitution subtracted the known terms twice: the
+  right-hand side it printed had already been reduced. The stated answer was
+  right and the line that derived it was wrong, which is the exact failure
+  the whole project is about.
+
 ### What it costs
 
-The corpus went from 672 to 767 characters per example, and the sequence cap
+The corpus went from 672 to 826 characters per example, and the sequence cap
 from 768 to 1,024 tokens, because the derivations now have a long tail. One
-example in two thousand is still over the cap.
+example in fifteen hundred is still over the cap.
 
 | | before | after |
 |---|---|---|
-| characters per example | 672 | 767 |
-| tokens per example | 329 | 375 |
-| corpus, 20,000 examples | 6.5 M tokens | 7.5 M tokens |
-| time per epoch at 704 tok/s | 2.5 h | 3.0 h |
+| characters per example | 672 | 826 |
+| tokens per example | 329 | 404 |
+| corpus, 20,000 examples | 6.5 M tokens | 8.1 M tokens |
+| time per epoch at 704 tok/s | 2.5 h | 3.2 h |
 
-`matrix_multiply` and `matrix_power` no longer generate 5×5 instances: a full
-product at that size is 25 dot products, which does not fit the cap. The
+`matrix_multiply` and `matrix_power` no longer generate 5×5 instances, and
+neither does `solve_system`: a full product at 5×5 is 25 dot products, and
+a 5×5 system runs its elimination and back substitution past the cap. The
 determinant keeps its 5×5, because its elimination is a handful of lines
-rather than a matrix of them.
+rather than a matrix of them — and the determinant is a quarter of the
+benchmark, so it matters most.
+
+`lu_factor` falls back to the terse form for the 17 % of matrices whose
+elimination needs a pivot swap, because the derivation shown here does not
+pivot. Those examples still have the correct answer; they just do not show
+the working.
+
+The evaluation now compares with a tolerance of 1e-4 rather than exactly.
+The corpus states some values rounded to six significant figures — the
+singular values, and the condition number built from them — so a model that
+reproduces the same six figures was being marked wrong. An answer that is
+off by one in an integer is still rejected.
 
 ## 6. Reading the benchmark score
 
