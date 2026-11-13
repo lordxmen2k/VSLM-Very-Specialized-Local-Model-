@@ -384,6 +384,12 @@ its own:
 with 12.88 GB, so it cannot run at 768 tokens however much of the card is
 free.
 
+The figure to read is `alloc`, not `resv`. The finished training run
+reserved 13.35 GB on a 12.88 GB card and ran perfectly well, because on
+Windows the driver maps host memory into the device address space and the
+caching allocator counts that against its reserved pool. Live tensors are
+the constraint; the reserved pool is not.
+
 The cause is the vocabulary, not the model. The base weights are under 1 GB.
 The logits are the whole problem: a bf16 copy, the fp32 copy the loss is
 computed in, the log-softmax, and the gradients of all of it come to about
@@ -398,10 +404,18 @@ batch 1 a batch's width is that example's own length, so there is no padding
 waste and the peak is set by the longest example rather than by the cap. At
 batch 2 the width is the longest of the two, so the wasted padding is real.
 
-**The budget follows directly.** The corpus is 6.5 M tokens per epoch, so one
-epoch is **about 86 minutes** at 1,256 tokens per second, and two epochs is
-about three hours. That measurement was taken with 1.3 GB of the card
-already in use by something else.
+**The budget follows from the real run, not from this.** The speed test runs
+seven steps on a card that has not warmed up. A real run is two and a half
+hours of sustained load and the clocks come down.
+
+The finished run: 1,250 steps in 153.4 minutes, 7.36 s per step against the
+speed test's 4.19, loss 1.3465 down to 0.0661, 4.36 GB allocated, 704 tokens
+per second sustained. **Plan on about two and a half hours per epoch.**
+
+The speed test is still worth having — it is what told us that batch 2 was
+impossible — but it measures a cold card and seven steps, and it should be
+read as a comparison between shapes rather than as a prediction of wall-clock
+time.
 
 ### The token budget, measured
 

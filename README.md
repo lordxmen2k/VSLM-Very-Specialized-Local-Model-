@@ -328,11 +328,20 @@ waste, and the peak is set by the longest example rather than by the cap.
 6.5 M tokens per epoch. 1.0 % of them are longer than the 768-token cap and
 are truncated — down from 2.9 % before the duplication was removed.
 
-**The training budget.** At the measured 1,256 tokens per second, one epoch
-is **about 86 minutes**. Two epochs is about three hours. That measurement
-was taken with 1.3 GB of the card already in use by something else — a
-browser or a container runtime — so close those first and it improves
-slightly.
+**The training budget.** The speed test runs seven steps on a card that has
+not warmed up. A real run is two and a half hours of sustained load, and the
+clocks come down. The finished run measured **153 minutes** for 1,250 steps
+— 7.36 s per step against the speed test's 4.19 — so **plan on about two and
+a half hours per epoch**, not the hour and a half the speed test suggests.
+
+The run itself: loss 1.35 → 0.066 over 1,250 steps, 4.36 GB allocated, 704
+tokens per second sustained.
+
+**The limit that matters is the allocated column**, not the reserved one.
+That run reserved 13.35 GB on a 12.88 GB card and ran perfectly well, because
+on Windows the driver maps host memory into the device address space and the
+allocator counts it as reserved. Live tensors are the constraint: a batch of
+two needs 16.09 GB of them, and there is nowhere for that to go.
 
 Measuring this took four attempts and the first three were wrong. The speed
 test ran all five shapes in one process, so the caching allocator carried
@@ -685,14 +694,14 @@ bitsandbytes wheel coverage for it is still catching up. If anything else
 misbehaves once the CUDA issue is resolved, a 3.12 or 3.13 environment is the
 safe choice.
 
-### The training is seven times slower than it should be
+### The training is slower than it should be
 
-If the speed test reports a `resv GB` figure larger than your card's memory,
-the run is spilling into host memory over PCIe, and on Windows that is several
-times slower than staying on the card. The measured table above shows it
-exactly: batch 1 at 12.02 GB reserved runs at 1,256 tokens per second, batch
-2 at 22.42 GB reserved runs at 218, on the same effective batch and the same
-tokens.
+If the speed test reports an `alloc GB` figure larger than your card's
+memory, the run is spilling into host memory over PCIe, and on Windows that
+is several times slower than staying on the card. The measured table above
+shows it exactly: batch 1 at 10.01 GB allocated runs at 1,256 tokens per
+second, batch 2 at 16.09 GB runs at 218, on the same effective batch and the
+same tokens.
 
 The lever is the micro-batch, and the reason is the vocabulary rather than
 the model. The logits dominate the memory — a bf16 copy, the fp32 copy the
@@ -704,9 +713,14 @@ why a batch of two needs 16 GB of live tensors on a card with 12.9.
 Halving the micro-batch halves that term, which is the only reason batch 1
 runs at all.
 
-`make speed-test` prints `OVER THE CARD` next to any row that crosses the
-limit, and the header reports how many examples the sequence cap is cutting
-and how much of the card was free when the run began.
+**Look at `alloc`, not `resv`.** A finished run reserved 13.35 GB on a
+12.88 GB card and ran perfectly well: on Windows the driver maps host memory
+into the device address space, and the caching allocator counts that as
+reserved. It is the live tensors that have to fit on the card.
+
+`make speed-test` prints `OVER THE CARD` next to any row whose *allocated*
+figure crosses the limit, and the header reports how many examples the
+sequence cap is cutting and how much of the card was free when the run began.
 
 ### The step times swing
 

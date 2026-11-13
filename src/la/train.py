@@ -332,7 +332,11 @@ def speed_test(args, rows, tok, pad_id) -> int:
         if parsed.get("oom"):
             print(f"  {bs:>6}{ga:>7}{bs*ga:>5}   out of memory")
             continue
-        over = "   OVER THE CARD" if card and parsed["resv"] > card else ""
+        # The limit is the live tensors: allocated cannot exceed the card
+        # without spilling into host memory. Reserved can - on Windows the
+        # driver maps host memory into the device address space - so a
+        # reserved figure over the card is not by itself a failure.
+        over = "   OVER THE CARD" if card and parsed["alloc"] > card else ""
         print(f"  {parsed['bs']:>6}{parsed['ga']:>7}{parsed['eff']:>5}"
               f"{parsed['s_step']:>9.2f}{parsed['tok_s']:>10,.0f}"
               f"{parsed['ex_s']:>8.1f}{parsed['alloc']:>10.2f}"
@@ -341,10 +345,13 @@ def speed_test(args, rows, tok, pad_id) -> int:
 
     print()
     if card:
-        print(f"  the card has {card:.2f} GB. A configuration whose reserved")
-        print("  memory exceeds it spills into host memory over PCIe, and on")
-        print("  Windows that is several times slower than staying on the card.")
-        print("  Take the fastest row that stays under.")
+        print(f"  the card has {card:.2f} GB. The limit that matters is the")
+        print("  allocated column: live tensors cannot exceed the card without")
+        print("  spilling into host memory over PCIe, which on Windows is")
+        print("  several times slower than staying on the card. The reserved")
+        print("  column can exceed the card on its own - the driver maps host")
+        print("  memory into the device address space - so it is not a failure")
+        print("  by itself.")
     print()
     return 0
 
@@ -521,6 +528,7 @@ def main(argv=None) -> int:
     data_s = 0.0
     tok_count = 0
     win_tok = 0
+    win_t = 0.0
     for epoch in range(math.ceil(args.epochs)):
         if done:
             break
@@ -552,6 +560,7 @@ def main(argv=None) -> int:
             now = time.time()
             step_s = now - last_step_t
             last_step_t = now
+            win_t += step_s
             # log the first step, the last step, and every log_every between
             # them, so a short smoke test still shows a curve
             if (step % args.log_every == 0 or step == 1 or step == total_steps):
@@ -569,10 +578,14 @@ def main(argv=None) -> int:
                     res = torch.cuda.max_memory_reserved() / 1e9
                     line += f"  vram {peak:.1f}/{res:.1f} GB"
                 line += f"  data {data_s:.1f}s"
-                if step_s > 0:
-                    line += f"  {win_tok/step_s:,.0f} tok/s"
+                if win_t > 0:
+                    # the tokens in the window over the time in the window.
+                    # Dividing the window's tokens by a single step's time
+                    # overstates the rate by the number of steps logged.
+                    line += f"  {win_tok/win_t:,.0f} tok/s"
                 data_s = 0.0
                 win_tok = 0
+                win_t = 0.0
                 print(line, flush=True)
                 run_loss = 0.0
                 win_micro = 0
