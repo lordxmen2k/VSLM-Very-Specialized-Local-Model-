@@ -504,6 +504,30 @@ Useful flags:
 | `--max-seq-len N` | cap the sequence length (default 512; the corpus runs to about 450) |
 | `--rank N`, `--alpha N` | LoRA rank and alpha (default 32 and 64) |
 
+### See what the model actually wrote
+
+```bash
+make explain
+```
+
+Reads the per-example results that `make eval` writes and says, for the
+questions the model got wrong, whether it wrote a derivation at all. That
+distinction is the one that matters after a training run: a model that emits
+a derivation and gets the arithmetic wrong is a different problem from one
+that jumps straight to the answer.
+
+```
+  of the failures, 128 wrote no scratchpad at all (64%)
+  and 0 wrote no answer block (0%)
+  the failures wrote a median of 0 STEP lines
+
+family                 wrong  no scratchpad  median steps
+  matrix_multiply          61              61             0
+```
+
+`python -m la.explain data/results.jsonl --family matrix_multiply --n 3`
+shows the completions themselves.
+
 ### Measure the inference speed
 
 ```bash
