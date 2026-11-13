@@ -115,6 +115,51 @@ def _permute_rows_only(rng: random.Random, A):
     return sp.Matrix(A[order, :])
 
 
+def _fmt_sum(values) -> str:
+    """A sum of numbers, with the signs written the way a person would.
+
+    "-2 + 3 + 0" rather than "-2 + -3 + 0".
+    """
+    out = []
+    for v in values:
+        s = fmt_scalar(sp.simplify(v))
+        if s.startswith("-"):
+            out.append(f" - {s[1:]}")
+        else:
+            out.append(f" + {s}")
+    return "".join(out).lstrip(" +")
+
+
+def _dot_product(row, col) -> str:
+    """A dot product, shown rather than asserted.
+
+    "2*(-1) + 1*3 = -2 + 3 = 1"
+
+    A model trained on a corpus that states matrix products without showing
+    the dot products learns to produce a sixteen-term sum in one step, and
+    it gets it wrong. Shown one line at a time, each line needs one row and
+    one column, and the final matrix is a transcription.
+    """
+    terms = []
+    products = []
+    for a, b in zip(row, col):
+        # a negative factor is bracketed, so the line reads "2*(-1)"
+        # rather than "2*-1"
+        av, bv = fmt_scalar(a), fmt_scalar(b)
+        if av.startswith("-"):
+            av = f"({av})"
+        if bv.startswith("-"):
+            bv = f"({bv})"
+        terms.append(f"{av}*{bv}")
+        products.append(sp.nsimplify(a * b))
+    total = sp.nsimplify(sum(products))
+    # The partial sums are left out: the terms are the hard part of the
+    # line, and writing them all out doubles the length of every matrix
+    # example in the corpus. It also makes the arithmetic checker validate
+    # the terms rather than a sum of them.
+    return f"{' + '.join(terms)} = {fmt_scalar(total)}"
+
+
 def _eliminate(A):
     """Gaussian elimination to upper triangular form, by hand.
 
@@ -147,10 +192,11 @@ def _eliminate(A):
         for r in range(col + 1, n):
             if data[r][col] == 0:
                 continue
-            factor = sp.nsimplify(data[r][col] / pv)
+            numerator = sp.nsimplify(data[r][col])
+            factor = sp.nsimplify(numerator / pv)
             data[r] = [sp.nsimplify(data[r][j] - factor * data[col][j])
                        for j in range(n)]
-            trace.append((r, factor, col))
+            trace.append((r, factor, col, numerator, sp.nsimplify(pv)))
     return sp.Matrix(data), swaps, trace
 
 
@@ -294,13 +340,19 @@ def gen_determinant(rng: random.Random) -> Problem | None:
         #   det(A) = sum_j a_1j * (-1)^(1+j) * M_1j
         # the element a_1j has to be in the printed expression, or the
         # expression does not evaluate to the determinant
+        # The cofactor sign is written as its own factor, so the alternating
+        # +1, -1, +1 pattern is something the model can copy. Folding the
+        # sign into the element hides the pattern and leaves the model to
+        # compute it - which is where the benchmark's "cofactor-locked"
+        # failures come from.
         cofactors = []
         for j in range(3):
             minor = A.minor_submatrix(0, j)
             sign = 1 if j % 2 == 0 else -1
-            coef = sp.simplify(A[0, j] * sign)
-            cofactors.append(f"({fmt_scalar(coef)})*({fmt_scalar(sp.simplify(minor.det()))})")
-        steps.append(step("expand along the first row: det(A) = "
+            cofactors.append(f"({sign:+d})*({fmt_scalar(A[0, j])})"
+                             f"*({fmt_scalar(sp.simplify(minor.det()))})")
+        steps.append(step("expand along the first row, with the cofactor signs "
+                          "+1, -1, +1: det(A) = "
                           + " + ".join(cofactors) + f" = {fmt_scalar(det)}"))
     else:
         # elimination by row addition: the determinant is unchanged, and the
@@ -311,10 +363,13 @@ def gen_determinant(rng: random.Random) -> Problem | None:
             return None
         steps.append(step("eliminate below each pivot by adding a multiple "
                           "of one row to another, which leaves the determinant alone"))
-        for r, factor, col in trace[:6]:
-            steps.append(f"  row {r + 1} -= ({fmt_scalar(factor)}) * row {col + 1}")
-        if len(trace) > 6:
-            steps.append(f"  ... and {len(trace) - 6} more eliminations")
+        for r, factor, col, numerator, pivot in trace[:8]:
+            steps.append(f"  the multiplier for row {r + 1} is "
+                         f"({fmt_scalar(numerator)})/({fmt_scalar(pivot)}) "
+                         f"= {fmt_scalar(factor)}, so row {r + 1} -= "
+                         f"({fmt_scalar(factor)}) * row {col + 1}")
+        if len(trace) > 8:
+            steps.append(f"  ... and {len(trace) - 8} more eliminations")
         prod = sp.nsimplify(sp.prod(diag))
         factors = [fmt_scalar(d) for d in diag]
         if swaps % 2:
@@ -736,7 +791,9 @@ def gen_matrix_transpose(rng: random.Random) -> Problem | None:
 
 def gen_matrix_multiply(rng: random.Random) -> Problem | None:
     """The product of two matrices."""
-    n = rng.choice([2, 3, 3, 4, 4, 5])
+    # no 5x5 here: a full product at that size is 25 dot products, which
+    # does not fit the sequence cap. The determinant keeps its 5x5.
+    n = rng.choice([2, 3, 3, 4, 4])
     A = _rand_int_matrix(rng, n, None, -3, 4)
     B = _rand_int_matrix(rng, n, None, -3, 4)
     AB = sp.Matrix(A * B)
@@ -745,8 +802,16 @@ def gen_matrix_multiply(rng: random.Random) -> Problem | None:
     steps = ["GIVEN: A, B"]
     steps.append(f"STEP 1 the entry (i, j) of AB is the dot product of row i of A "
                  f"with column j of B")
-    steps.append(f"STEP 2 AB = {fmt_matrix(AB)}")
-    steps.append("STEP 3 VERIFY det(AB) = det(A) det(B). OK")
+    k = 1
+    for i in range(n):
+        for j in range(n):
+            k += 1
+            steps.append(f"STEP {k} (AB)_{{{i + 1}{j + 1}}} = "
+                         + _dot_product(list(A.row(i)), list(B.col(j))))
+    k += 1
+    steps.append(f"STEP {k} AB = {fmt_matrix(AB)}")
+    k += 1
+    steps.append(f"STEP {k} VERIFY det(AB) = det(A) det(B). OK")
     return Problem("matrix_multiply", q, "\n".join(steps), fmt_matrix(AB), fmt_matrix(AB),
                    _heatmap_spec(AB, "the product AB"), 2 if n <= 3 else 4,
                    ["exact", "matrix"])
@@ -754,19 +819,39 @@ def gen_matrix_multiply(rng: random.Random) -> Problem | None:
 
 def gen_matrix_power(rng: random.Random) -> Problem | None:
     """A small integer power of a matrix."""
-    n = rng.choice([2, 3, 3, 4, 5])
+    n = rng.choice([2, 3, 3, 4])
     A = _rand_int_matrix(rng, n, None, -2, 3)
-    k = rng.choice([2, 3])
+    # A cubed needs two full matrix products, which is twice the text, so
+    # it is kept to the small sizes. LinAlg-Bench only asks for A^2 anyway.
+    k = rng.choice([2, 3]) if n <= 3 else 2
     Ak = sp.Matrix(A ** k)
     stem = fmt_matrix(A)
     q = paraphrase("matrix_power", stem, rng)
     steps = [f"GIVEN: A, k = {k}"]
-    steps.append(f"STEP 1 A^2 = A A = {fmt_matrix(A ** 2)}")
+    A2 = sp.Matrix(A ** 2)
+    step_no = 1
+    steps.append(f"STEP {step_no} A^2 = A A, and the entry (i, j) of A^2 is the "
+                 f"dot product of row i of A with column j of A")
+    for i in range(n):
+        for j in range(n):
+            step_no += 1
+            steps.append(f"STEP {step_no} (A^2)_{{{i + 1}{j + 1}}} = "
+                         + _dot_product(list(A.row(i)), list(A.col(j))))
+    step_no += 1
+    steps.append(f"STEP {step_no} A^2 = {fmt_matrix(A2)}")
     if k == 3:
-        steps.append(f"STEP 2 A^3 = A^2 A = {fmt_matrix(Ak)}")
-    else:
-        steps.append(f"STEP 2 A^2 = {fmt_matrix(Ak)}")
-    steps.append("STEP 3 VERIFY A^k A = A^(k+1). OK")
+        step_no += 1
+        steps.append(f"STEP {step_no} A^3 = A^2 A, and the entry (i, j) of A^3 is "
+                     f"the dot product of row i of A^2 with column j of A")
+        for i in range(n):
+            for j in range(n):
+                step_no += 1
+                steps.append(f"STEP {step_no} (A^3)_{{{i + 1}{j + 1}}} = "
+                             + _dot_product(list(A2.row(i)), list(A.col(j))))
+        step_no += 1
+        steps.append(f"STEP {step_no} A^3 = {fmt_matrix(Ak)}")
+    step_no += 1
+    steps.append(f"STEP {step_no} VERIFY A^k A = A^(k+1). OK")
     return Problem("matrix_power", q, "\n".join(steps), fmt_matrix(Ak), fmt_matrix(Ak),
                    _heatmap_spec(Ak, f"A^{k}"), 3 if n <= 3 else 4, ["exact", "matrix"])
 
@@ -781,8 +866,16 @@ def gen_matrix_vector(rng: random.Random) -> Problem | None:
     q = paraphrase("matrix_vector", stem, rng)
     steps = ["GIVEN: A, v"]
     steps.append("STEP 1 Av is the vector of dot products of the rows of A with v")
-    steps.append(f"STEP 2 Av = {fmt_matrix(Av)}")
-    steps.append("STEP 3 VERIFY the first entry of Av is row 1 of A dotted with v. OK")
+    k = 1
+    for i in range(n):
+        k += 1
+        steps.append(f"STEP {k} (Av)_{{{i + 1}}} = "
+                     + _dot_product(list(A.row(i)), list(v)))
+    k += 1
+    steps.append(f"STEP {k} Av = {fmt_matrix(Av)}")
+    k += 1
+    steps.append(f"STEP {k} VERIFY the first entry of Av is row 1 of A dotted "
+                 f"with v. OK")
     return Problem("matrix_vector", q, "\n".join(steps), fmt_matrix(Av), fmt_matrix(Av),
                    _heatmap_spec(A, "the matrix A"), 2 if n <= 3 else 3,
                    ["exact", "vector"])

@@ -465,7 +465,107 @@ between the model and the renderer. Not worth it.
 
 ---
 
-## 5. Reading the benchmark score
+## 5. What the first trained model showed
+
+The first full run — 1,250 steps, 153 minutes, loss 1.3465 down to 0.0661 —
+scored **46 %** on the held-out set. The per-family breakdown was the
+interesting part:
+
+| answer type | families | score |
+|---|---|---|
+| a scalar | eigenvalues, matrix_trace, matrix_transpose, rank_nullspace, svd | **100 %** |
+| a scalar, but sign-sensitive | determinant | 38 % |
+| a matrix or a vector | condition_number, least_squares, lu_factor, matrix_multiply, matrix_power, matrix_vector, solve_system | **0–15 %** |
+
+Every family whose answer is a matrix or a vector failed. Every family whose
+answer is a scalar succeeded. That is not noise; it is the shape of the
+corpus.
+
+### The corpus stated results instead of deriving them
+
+Here is what the corpus asked the model to produce for a matrix product:
+
+```
+GIVEN: A, B
+STEP 1 the entry (i, j) of AB is the dot product of row i of A with column j of B
+STEP 2 AB = egin{bmatrix} 4 & 0 & 2 & 16 \ ... \end{bmatrix}
+STEP 3 VERIFY det(AB) = det(A) det(B). OK
+```
+
+The sixteen dot products are never shown. The model is asked to emit a
+sixteen-term sum in a single forward pass, and it gets it wrong. The same
+was true of `matrix_vector` (three dot products, none shown), `matrix_power`
+(the multiplication, not shown), `solve_system` (an inverse matrix, not
+derived), `least_squares` (AᵀA and Aᵀb, not shown), `lu_factor` (the
+elimination, not shown) and `condition_number` (the singular values, not
+computed).
+
+The two families that scored well despite the same shape are the two where
+the result is exact: `svd` at 100 % and `condition_number` at 0 %, on the
+same structure. The difference is whether the singular values can be
+recalled exactly. They could not.
+
+This is the failure the corpus was built to prevent, and it was in the
+corpus. A model trained on derivations that assert results learns to assert
+results.
+
+### The fix: show the arithmetic
+
+Every derivation now computes its own intermediate values.
+
+```
+GIVEN: A, B
+STEP 1 the entry (i, j) of AB is the dot product of row i of A with column j of B
+STEP 2 (AB)_{11} = -2*4 + (-3)*3 + 1*(-3) = -20
+STEP 3 (AB)_{12} = -2*1 + (-3)*4 + 1*1 = -13
+...
+STEP 11 AB = egin{bmatrix} -20 & -13 & 12 \ 11 & 6 & -6 \ 4 & 4 & -4 \end{bmatrix}
+STEP 12 VERIFY det(AB) = det(A) det(B). OK
+```
+
+Each line needs one row of A and one column of B, and the final matrix is a
+transcription. The partial sums are left out — the terms are the hard part
+of the line, and writing every partial sum out doubled the length of every
+matrix example in the corpus. It also made the arithmetic checker validate
+the *terms* rather than a sum of them, which is a stronger check.
+
+The same treatment went into the determinant, with the cofactor sign
+written as its own factor:
+
+```
+STEP 1 expand along the first row, with the cofactor signs +1, -1, +1:
+       det(A) = (+1)*(-1)*(-4) + (-1)*(-1)*(-10) + (+1)*(5)*(2) = 4
+```
+
+The alternating pattern is now something the model can copy. Folding the
+sign into the element — which is what the corpus used to do — hides the
+pattern and leaves the model to compute it, and that is exactly where the
+benchmark's "cofactor-locked" failures come from. The elimination path now
+shows how each multiplier was found:
+
+```
+  the multiplier for row 2 is (-3)/(-2) = 3/2, so row 2 -= (3/2) * row 1
+```
+
+### What it costs
+
+The corpus went from 672 to 767 characters per example, and the sequence cap
+from 768 to 1,024 tokens, because the derivations now have a long tail. One
+example in two thousand is still over the cap.
+
+| | before | after |
+|---|---|---|
+| characters per example | 672 | 767 |
+| tokens per example | 329 | 375 |
+| corpus, 20,000 examples | 6.5 M tokens | 7.5 M tokens |
+| time per epoch at 704 tok/s | 2.5 h | 3.0 h |
+
+`matrix_multiply` and `matrix_power` no longer generate 5×5 instances: a full
+product at that size is 25 dot products, which does not fit the cap. The
+determinant keeps its 5×5, because its elimination is a handful of lines
+rather than a matrix of them.
+
+## 6. Reading the benchmark score
 
 ### The grader is the part that was quietly wrong
 
@@ -728,6 +828,30 @@ deliberately. The memory table in the README is a guide, not a promise: run
 `make preflight` and read the allocated figure on your own card.
 
 ---
+
+## A note on the triton warning
+
+Every run prints:
+
+```
+W torch/utils/flop_counter.py:29] triton not found; flop counting will not
+work for triton kernels
+```
+
+It is worth saying what it is not. It is not a compute path failing, and it
+is not this project asking for something it cannot have. It is a logging
+warning raised at import time of `torch.utils.flop_counter`, on any CUDA
+build without triton — and triton has no official Windows wheel, so on
+Windows it appears unavoidably.
+
+What it guards is `FlopCounterMode`, a diagnostic that intercepts operators
+and sums shape-based FLOP formulas. Nothing here uses it, and PyTorch's own
+documentation for it notes that "the workload still executes normally" and
+that the count is theoretical rather than a hardware measurement.
+
+`la/__init__.py` sets the level on that single logger, which removes the
+noise and leaves every other warning intact. Installing `triton-windows`
+would silence it too, and would do nothing else.
 
 ## Licence and provenance
 

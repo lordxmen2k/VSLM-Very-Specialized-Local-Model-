@@ -60,12 +60,13 @@ class TestTrainingDefaults(unittest.TestCase):
         self.assertEqual(16, self.d["--grad-accum"])
 
     def test_sequence_length_leaves_the_tail_intact(self):
-        # the corpus runs to a median of 344 tokens with a tail past 512, so
-        # a 512 cap was cutting a few per cent of the examples and losing
-        # the end of their completions. The cap has to clear the tail, and
-        # make speed-test reports how many examples it is still cutting.
-        self.assertGreaterEqual(self.d["--max-seq-len"], 512)
-        self.assertLessEqual(self.d["--max-seq-len"], 1024)
+        # the derivations now show their arithmetic, so the corpus has a
+        # long tail: a 768 cap was cutting the biggest matrix products and
+        # losing the end of their completions, which is where the answer and
+        # the plot spec are. The cap has to clear the tail, and make
+        # speed-test reports how many examples it is still cutting.
+        self.assertGreaterEqual(self.d["--max-seq-len"], 1024)
+        self.assertLessEqual(self.d["--max-seq-len"], 1536)
 
     def test_the_worst_case_logits_leave_room_on_the_card(self):
         # the logits dominate the memory: a bf16 copy, an fp32 copy for the

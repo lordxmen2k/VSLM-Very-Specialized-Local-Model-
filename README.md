@@ -538,6 +538,36 @@ headline number cannot tell you which is which. A model that abstains
 correctly on a fifth of the problems is more useful than one that confabulates
 the same fraction.
 
+### What the first trained model showed
+
+The first full run — 1,250 steps, 153 minutes, loss 1.3465 → 0.0661 — scored
+**46 %** on the held-out set, and the per-family breakdown was the finding:
+
+| answer type | families | score |
+|---|---|---|
+| a scalar | eigenvalues, trace, transpose, rank_nullspace, svd | **100 %** |
+| a scalar, sign-sensitive | determinant | 38 % |
+| a matrix or a vector | condition_number, least_squares, lu_factor, multiply, power, vector, solve_system | **0–15 %** |
+
+Every family whose answer is a matrix or a vector failed, and every scalar
+family succeeded. That is the shape of the corpus, because **the corpus
+stated results instead of deriving them**: a matrix product was written as
+
+```
+STEP 2 AB = egin{bmatrix} 4 & 0 & 2 & 16 \ ... \end{bmatrix}
+```
+
+with the sixteen dot products never shown. The model was being asked to emit
+a sixteen-term sum in one forward pass. A model trained on derivations that
+assert results learns to assert results.
+
+Every derivation now shows its arithmetic, one line per dot product, and the
+determinant's cofactor sign is written as its own factor so the alternating
+pattern is copyable rather than computed. The corpus grew from 672 to 767
+characters per example and the sequence cap from 768 to 1,024 tokens, which
+takes an epoch from 2.5 hours to 3.0. The full account is in
+[docs/HOW-IT-WORKS.md](docs/HOW-IT-WORKS.md).
+
 ### The published benchmark
 
 > **The grader was wrong before the model was.** Three separate bugs in the
@@ -721,6 +751,22 @@ reserved. It is the live tensors that have to fit on the card.
 `make speed-test` prints `OVER THE CARD` next to any row whose *allocated*
 figure crosses the limit, and the header reports how many examples the
 sequence cap is cutting and how much of the card was free when the run began.
+
+### "triton not found; flop counting will not work for triton kernels"
+
+Harmless, and silenced by this project. It is a logging warning that PyTorch
+emits at import time of `torch.utils.flop_counter` on any CUDA build without
+triton, which is the normal case on Windows — the official triton wheels are
+for Linux and macOS.
+
+The counter it guards, `FlopCounterMode`, is a diagnostic that sums
+shape-based FLOP formulas. This project never uses it, and PyTorch's own
+documentation for it says the workload still executes normally. Nothing about
+training, inference or the benchmark score depends on it.
+
+`la/__init__.py` sets the level on that one logger, so the warning is gone
+and every other warning still shows. Installing `triton-windows` would also
+silence it and change nothing else; there is no reason to.
 
 ### The step times swing
 
