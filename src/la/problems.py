@@ -275,7 +275,7 @@ def gen_determinant(rng: random.Random) -> Problem | None:
         return None
     stem = fmt_matrix(A)
     q = paraphrase("determinant", stem, rng)
-    steps = [f"GIVEN: A = {fmt_matrix(A)}"]
+    steps = ["GIVEN: A"]
     step_no = 0
 
     def step(text: str) -> str:
@@ -345,7 +345,7 @@ def gen_solve_system(rng: random.Random) -> Problem | None:
         return None
     stem = f"{fmt_matrix(A)} x = {fmt_matrix(b)}"
     q = paraphrase("solve_system", stem, rng)
-    steps = [f"GIVEN: A = {fmt_matrix(A)}, b = {fmt_matrix(b)}"]
+    steps = ["GIVEN: A, b"]
     det = sp.simplify(A.det())
     steps.append(f"STEP 1 det(A) = {fmt_scalar(det)} != 0, so A is invertible and "
                  "the solution is unique.")
@@ -359,7 +359,7 @@ def gen_solve_system(rng: random.Random) -> Problem | None:
             "data": {"matrix": _mat(A), "echelon": _mat(rref)},
             "labels": {"left": "A", "right": "rref(A)",
                        "title": "the system and its reduced row echelon form"},
-            "annotate": [f"x = {fmt_matrix(x)}"]}
+            "annotate": []}
     return Problem("solve_system", q, scratch, fmt_matrix(x), fmt_matrix(x),
                    spec, 1 if n == 2 else (3 if n == 3 else 4), ["exact", "vector"], stem=stem)
 
@@ -376,7 +376,7 @@ def gen_eigenvalues(rng: random.Random) -> Problem | None:
         return None
     stem = fmt_matrix(A)
     q = paraphrase("eigenvalues", stem, rng)
-    steps = [f"GIVEN: A = {fmt_matrix(A)}"]
+    steps = ["GIVEN: A"]
     char = A.charpoly().as_expr()
     steps.append(f"STEP 1 the characteristic polynomial is p(λ) = {sp.sstr(char)}")
     steps.append("STEP 2 the roots of p are "
@@ -406,7 +406,7 @@ def gen_diagonalize(rng: random.Random) -> Problem | None:
     D = sp.diag(*[sp.simplify(v) for v in A.eigenvals()])
     stem = fmt_matrix(A)
     q = paraphrase("diagonalize", stem, rng)
-    steps = [f"GIVEN: A = {fmt_matrix(A)}"]
+    steps = ["GIVEN: A"]
     steps.append("STEP 1 the eigenvalues of A are "
                  + ", ".join(fmt_scalar(v) for v in D.diagonal()) )
     steps.append(f"STEP 2 so the diagonal form is D = {fmt_matrix(D)}")
@@ -443,8 +443,7 @@ def gen_orthonormal_basis(rng: random.Random) -> Problem | None:
     Q = sp.Matrix(sp.Matrix.hstack(*Q_cols))
     stem = ", ".join(fmt_matrix(v) for v in vecs)
     q = paraphrase("orthonormal_basis", stem, rng)
-    steps = ["GIVEN: v1 = " + fmt_matrix(vecs[0])
-             + (", v2 = " + fmt_matrix(vecs[1]) if k > 1 else "")]
+    steps = ["GIVEN: " + ", ".join(f"v{i+1}" for i in range(k))]
     for i in range(k):
         if i == 0:
             steps.append(f"STEP {i+1} w1 = v1 (there is nothing to subtract yet) "
@@ -452,9 +451,12 @@ def gen_orthonormal_basis(rng: random.Random) -> Problem | None:
         else:
             steps.append(f"STEP {i+1} w{i+1} = v{i+1} - sum over earlier vectors gives "
                          f"w{i+1} = {fmt_matrix(Q[:, i])}")
-        steps.append(f"STEP {i+1}b normalise: ||w{i+1}|| = "
-                     f"{fmt_scalar(sp.simplify(Q[:, i].dot(Q[:, i])))} so the "
-                     f"unit vector is {fmt_matrix(Q[:, i])}")
+        # Q[:, i] is already a unit vector, so the squared norm is 1 and no
+        # rescaling is needed. Printing the matrix a second time here was
+        # pure duplication - it made this family the longest in the corpus.
+        steps.append(f"STEP {i+1}b the squared norm of w{i+1} is "
+                     f"{fmt_scalar(sp.simplify(Q[:, i].dot(Q[:, i])))}"
+                     f", so w{i+1} is already a unit vector")
     steps.append(f"STEP {k+1} VERIFY the vectors are orthonormal. OK")
     scratch = "\n".join(s for s in steps if s)
     spec = {"kind": "basis_3d" if n == 3 else "basis_2d",
@@ -477,7 +479,7 @@ def gen_projection(rng: random.Random) -> Problem | None:
     resid = sp.simplify(v - proj)
     stem = f"v = {fmt_matrix(v)} and w = {fmt_matrix(w)}"
     q = paraphrase("projection", stem, rng)
-    steps = [f"GIVEN: v = {fmt_matrix(v)}, w = {fmt_matrix(w)}"]
+    steps = ["GIVEN: v, w"]
     steps.append(f"STEP 1 <v, w> = {fmt_scalar(sp.simplify(v.dot(w)))} and "
                  f"<w, w> = {fmt_scalar(sp.simplify(w.dot(w)))}")
     steps.append(f"STEP 2 proj = (<v,w> / <w,w>) w = {fmt_matrix(proj)}")
@@ -513,7 +515,7 @@ def gen_least_squares(rng: random.Random) -> Problem | None:
     resid = sp.simplify(A * x - b)
     stem = f"{fmt_matrix(A)} x = {fmt_matrix(b)}"
     q = paraphrase("least_squares", stem, rng)
-    steps = [f"GIVEN: A = {fmt_matrix(A)} ({m}x{n}), b = {fmt_matrix(b)}"]
+    steps = [f"GIVEN: A ({m}x{n}), b"]
     steps.append(f"STEP 1 A has full column rank {n}, so the least-squares "
                  "solution is unique.")
     steps.append(f"STEP 2 x = (A^T A)^{{-1}} A^T b = {fmt_matrix(x)}")
@@ -543,7 +545,7 @@ def gen_lu_factor(rng: random.Random) -> Problem | None:
     L, U = sp.Matrix(L), sp.Matrix(U)
     stem = fmt_matrix(A)
     q = paraphrase("lu_factor", stem, rng)
-    steps = [f"GIVEN: A = {fmt_matrix(A)}"]
+    steps = ["GIVEN: A"]
     steps.append(f"STEP 1 eliminate below the first pivot to get L = {fmt_matrix(L)} "
                  f"and U = {fmt_matrix(U)}")
     steps.append(f"STEP 2 VERIFY L U = {fmt_matrix(L * U)} = A. OK")
@@ -587,7 +589,7 @@ def gen_svd(rng: random.Random) -> Problem | None:
     vals = [sp.Integer(s) for s in svals]
     stem = fmt_matrix(A)
     q = paraphrase("svd", stem, rng)
-    steps = [f"GIVEN: A = {fmt_matrix(A)}"]
+    steps = ["GIVEN: A"]
     steps.append("STEP 1 the eigenvalues of A^T A are "
                  + ", ".join(str(s * s) for s in svals))
     steps.append("STEP 2 the singular values are their square roots: "
@@ -615,7 +617,7 @@ def gen_condition_number(rng: random.Random) -> Problem | None:
     cond_text = f"{cond:.6g}"
     stem = fmt_matrix(A)
     q = paraphrase("condition_number", stem, rng)
-    steps = [f"GIVEN: A = {fmt_matrix(A)}"]
+    steps = ["GIVEN: A"]
     steps.append("STEP 1 the singular values of A are "
                  + ", ".join(f"{s:.6g}" for s in sv))
     steps.append(f"STEP 2 cond_2(A) = σ_max / σ_min = {cond_text}")
@@ -643,7 +645,7 @@ def gen_rank_nullspace(rng: random.Random) -> Problem | None:
     nullity = n - r
     stem = fmt_matrix(A)
     q = paraphrase("rank_nullspace", stem, rng)
-    steps = [f"GIVEN: A = {fmt_matrix(A)}"]
+    steps = ["GIVEN: A"]
     rref = A.rref()[0]
     steps.append(f"STEP 1 row reduction gives {fmt_matrix(rref)}, which has "
                  f"{r} pivot rows")
@@ -673,7 +675,7 @@ def gen_linear_transform(rng: random.Random) -> Problem | None:
     img = sp.Matrix(A * v)
     stem = f"{fmt_matrix(A)} and v = {fmt_matrix(v)}"
     q = paraphrase("linear_transform", stem, rng)
-    steps = [f"GIVEN: A = {fmt_matrix(A)}, v = {fmt_matrix(v)}"]
+    steps = ["GIVEN: A, v"]
     steps.append(f"STEP 1 T(v) = A v = {fmt_matrix(img)}")
     unit = sp.Matrix([[0, 0], [1, 0], [1, 1], [0, 1]])
     corners = sp.Matrix(4, 2, lambda i, j: sp.simplify((A * unit[i, :].T)[j]))
@@ -707,7 +709,7 @@ def gen_matrix_trace(rng: random.Random) -> Problem | None:
     tr = sp.simplify(sp.trace(A))
     stem = fmt_matrix(A)
     q = paraphrase("matrix_trace", stem, rng)
-    steps = [f"GIVEN: A = {fmt_matrix(A)}"]
+    steps = ["GIVEN: A"]
     steps.append("STEP 1 the trace is the sum of the diagonal entries: "
                  + " + ".join(fmt_scalar(A[i, i]) for i in range(n))
                  + f" = {fmt_scalar(tr)}")
@@ -723,7 +725,7 @@ def gen_matrix_transpose(rng: random.Random) -> Problem | None:
     At = A.T
     stem = fmt_matrix(A)
     q = paraphrase("matrix_transpose", stem, rng)
-    steps = [f"GIVEN: A = {fmt_matrix(A)}"]
+    steps = ["GIVEN: A"]
     steps.append("STEP 1 the transpose exchanges rows and columns, so "
                  f"(A^T)_{{ij}} = A_{{ji}}")
     steps.append(f"STEP 2 A^T = {fmt_matrix(At)}")
@@ -740,7 +742,7 @@ def gen_matrix_multiply(rng: random.Random) -> Problem | None:
     AB = sp.Matrix(A * B)
     stem = f"{fmt_matrix(A)} and {fmt_matrix(B)}"
     q = paraphrase("matrix_multiply", stem, rng)
-    steps = [f"GIVEN: A = {fmt_matrix(A)}, B = {fmt_matrix(B)}"]
+    steps = ["GIVEN: A, B"]
     steps.append(f"STEP 1 the entry (i, j) of AB is the dot product of row i of A "
                  f"with column j of B")
     steps.append(f"STEP 2 AB = {fmt_matrix(AB)}")
@@ -758,7 +760,7 @@ def gen_matrix_power(rng: random.Random) -> Problem | None:
     Ak = sp.Matrix(A ** k)
     stem = fmt_matrix(A)
     q = paraphrase("matrix_power", stem, rng)
-    steps = [f"GIVEN: A = {fmt_matrix(A)}, k = {k}"]
+    steps = [f"GIVEN: A, k = {k}"]
     steps.append(f"STEP 1 A^2 = A A = {fmt_matrix(A ** 2)}")
     if k == 3:
         steps.append(f"STEP 2 A^3 = A^2 A = {fmt_matrix(Ak)}")
@@ -777,7 +779,7 @@ def gen_matrix_vector(rng: random.Random) -> Problem | None:
     Av = sp.Matrix(A * v)
     stem = f"{fmt_matrix(A)} and v = {fmt_matrix(v)}"
     q = paraphrase("matrix_vector", stem, rng)
-    steps = [f"GIVEN: A = {fmt_matrix(A)}, v = {fmt_matrix(v)}"]
+    steps = ["GIVEN: A, v"]
     steps.append("STEP 1 Av is the vector of dot products of the rows of A with v")
     steps.append(f"STEP 2 Av = {fmt_matrix(Av)}")
     steps.append("STEP 3 VERIFY the first entry of Av is row 1 of A dotted with v. OK")

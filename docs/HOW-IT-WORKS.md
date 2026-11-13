@@ -403,18 +403,45 @@ The supervised part of an average example:
 
 | part | characters | share of supervised text |
 |---|---|---|
-| scratchpad steps | ~470 | 73 % |
+| scratchpad steps | ~410 | 75 % |
 | plot spec | 196 | (25 % of the whole example) |
-| GIVEN line | 105 | 17 % |
-| VERIFY line | 62 | 10 % |
+| GIVEN line | 0 | 0 % |
+| VERIFY line | 62 | 11 % |
 
-The GIVEN line restates the matrix, which is already in the question. It is
-17 % of the supervised text spent copying. The VERIFY line is a deliberate
-teaching device and stays. The plot spec is a quarter of the example, but only
-58 of its 196 characters are the matrix being copied — the rest is JSON
-scaffolding — so redesigning the spec format to reference the matrix would
-save about 8 % and would break the contract between the model and the
-renderer. Not worth it.
+Two of those numbers used to be much worse, and both fixes were worth making.
+
+**The GIVEN line used to reprint the matrix.** The question already contains
+it — the corpus builds the question from the same matrix — so the line was a
+pure copy task, 17 % of the supervised text spent transcribing. It now names
+the objects instead:
+
+```
+GIVEN: A, b
+STEP 1 det(A) = -48 != 0, so A is invertible and the solution is unique.
+```
+
+Removing it took the corpus from 781 to 672 characters per example, fourteen
+per cent, and it is a better training signal: the model is no longer being
+asked to copy.
+
+**The orthonormalisation step used to print the same matrix twice.** Once as
+the result of the step, and once again in the normalise line, identically. It
+also mislabelled the quantity: the code computed `w · w`, which is the
+*squared* norm, and printed it as `||w||`. It now says what it means:
+
+```
+STEP 1 w1 = v1 (there is nothing to subtract yet) gives w1 = <matrix>
+STEP 1b the squared norm of w1 is 1, so w1 is already a unit vector
+```
+
+That family was the longest in the corpus at 1,441 tokens for the largest
+instance; it is now 992.
+
+The VERIFY line is a deliberate teaching device and stays. The plot spec is a
+quarter of the example, but only 58 of its 196 characters are the matrix being
+copied — the rest is JSON scaffolding — so redesigning the spec format to
+reference the matrix would save about 8 % and would break the contract
+between the model and the renderer. Not worth it.
 
 ---
 

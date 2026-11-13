@@ -26,7 +26,7 @@ def main(argv=None) -> int:
     ap.add_argument("--base", default="Qwen/Qwen3-1.7B-Base")
     ap.add_argument("--adapter", default="runs/vslm")
     ap.add_argument("--question", default="")
-    ap.add_argument("--max-new-tokens", type=int, default=768)
+    ap.add_argument("--max-new-tokens", type=int, default=1024)
     ap.add_argument("--temperature", type=float, default=0.0)
     ap.add_argument("--out-dir", default="outputs")
     ap.add_argument("--no-plot", action="store_true")

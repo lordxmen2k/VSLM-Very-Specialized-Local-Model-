@@ -35,7 +35,7 @@ found along the way are written down rather than quietly fixed — see
 - [What it produces](#what-it-produces)
 - [Quick start](#quick-start)
 - [The seventeen families](#the-seventeen-families)
-- [Four decisions that shape everything](#four-decisions-that-shape-everything)
+- [Five decisions that shape everything](#five-decisions-that-shape-everything)
 - [How it fits on a 12 GB card](#how-it-fits-on-a-12-gb-card)
 - [Install](#install)
 - [The commands](#the-commands)
@@ -151,7 +151,7 @@ anyone else's.
 
 ---
 
-## Four decisions that shape everything
+## Five decisions that shape everything
 
 ### 1. The ground truth is mechanical
 
@@ -230,7 +230,28 @@ training data printed the signed minors and left out the matrix element, so
 the expression it wrote was not the determinant. A corpus that exhibits
 `Cofactor_Neglect` would be teaching the error the benchmark measures.
 
-### 4. Every derivation ends with a check
+### 4. Nothing in the training signal is a copy task
+
+Two lines of every example used to be pure duplication, and both were
+removed.
+
+The `GIVEN` line reprinted the matrix that the question already contains.
+It was 17 % of the supervised text spent transcribing. It now names the
+objects and moves on:
+
+```
+GIVEN: A, b
+STEP 1 det(A) = -48 != 0, so A is invertible and the solution is unique.
+```
+
+The orthonormalisation step printed the same matrix twice, identically, and
+mislabelled the quantity it was printing — it computed the *squared* norm and
+called it `||w||`. Both are fixed.
+
+The corpus went from 781 to 672 characters per example. Fourteen per cent
+less work, and a better signal: the model is never asked to copy.
+
+### 5. Every derivation ends with a check
 
 Each generated derivation closes with a `VERIFY` line. The model learns to
 state the check, which is the one thing that separates a model you can audit
@@ -302,10 +323,11 @@ card.** That is batch 2 with 8-way accumulation, at 1,633 tokens per second —
 twice as fast as batch 1, and seven times faster than batch 4.
 
 **The training budget, from that measurement.** The corpus is 20,000
-examples at a mean of 358 tokens, which is 7.16 M tokens per epoch. At 1,633
-tokens per second that is **73 minutes per epoch** — or 1,250 optimiser steps
-at 3.58 s each, which is the same number by another route. Two epochs is about
-two and a half hours.
+examples at a mean of 329 tokens — 6.6 M tokens per epoch — after the
+duplication described below was removed. At 1,454 tokens per second that is
+**about 75 minutes per epoch**, or 1,250 optimiser steps at 4.25 s each,
+which is the same number by another route. Two epochs is about two and a
+half hours.
 
 Only 1.99 % of the parameters are trainable: 34,865,152 LoRA parameters
 against 1,755,440,128 in total. The frozen base is never updated.

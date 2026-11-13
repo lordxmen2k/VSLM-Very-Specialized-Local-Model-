@@ -47,7 +47,7 @@ def build_prompt(question: str) -> str:
     return f"### Problem\n{question}\n\n### Scratchpad\n"
 
 
-def generate(tok, model, questions: list[str], max_new_tokens: int = 768,
+def generate(tok, model, questions: list[str], max_new_tokens: int = 1024,
              temperature: float = 0.0, batch_size: int = 8) -> list[str]:
     """Generate one completion per question."""
     outs: list[str] = []

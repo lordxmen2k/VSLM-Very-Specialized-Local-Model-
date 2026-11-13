@@ -189,7 +189,7 @@ def report(res: dict, label: str, problems: list[dict]) -> None:
 
 
 def measure_perf(tok, model, prompts: list[str], batch_sizes=(1, 4, 8),
-                 max_new_tokens: int = 256) -> dict:
+                 max_new_tokens: int = 1024) -> dict:
     """Time to first token, decode throughput and peak VRAM."""
     import torch
     out: dict = {}
@@ -230,7 +230,7 @@ def main(argv=None) -> int:
     ap.add_argument("--baseline", action="store_true",
                     help="also score the base model with no adapter, for the delta")
     ap.add_argument("--perf", action="store_true", help="measure speed and memory")
-    ap.add_argument("--max-new-tokens", type=int, default=768)
+    ap.add_argument("--max-new-tokens", type=int, default=1024)
     ap.add_argument("--batch-size", type=int, default=8)
     ap.add_argument("--temperature", type=float, default=0.0)
     ap.add_argument("--out", default="")
