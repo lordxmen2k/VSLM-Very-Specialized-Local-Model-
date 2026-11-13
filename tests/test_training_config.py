@@ -42,20 +42,22 @@ class TestTrainingDefaults(unittest.TestCase):
 
     def test_micro_batch_is_the_measured_optimum(self):
         # make speed-test on an RTX 4070 SUPER measured five shapes at the
-        # same effective batch of 16:
+        # same effective batch of 16, each in its own process, with the card
+        # otherwise idle:
         #
-        #   batch  accum   s/step     tok/s   reserved
-        #       1     16      6.87       814       4.33   under the card
-        #       2      8      3.58     1,633       7.45   under the card
-        #       4      4     24.40       231      13.68   over it
-        #       8      2     36.36       169      26.12   over it
-        #      16      1     29.04       191      27.97   over it
+        #   batch  accum   s/step     tok/s   allocated   reserved
+        #       1     16      4.19     1,256       10.01      12.02   fits
+        #       2      8     24.08       218       16.09      22.42   over
+        #       4      4       -          -           -          -   oom
+        #       8      2       -          -           -          -   oom
+        #      16      1       -          -           -          -   oom
         #
-        # A configuration whose reserved memory passes the card's physical
-        # VRAM spills into host memory over PCIe and is several times
-        # slower. Batch 2 was the fastest row that stayed under it.
-        self.assertEqual(2, self.d["--batch-size"])
-        self.assertEqual(8, self.d["--grad-accum"])
+        # A batch of two needs 16.09 GB of live tensors on a card with
+        # 12.88 GB, so it cannot run at 768 tokens however much of the card
+        # is free. The logits and their gradient cost about 6 GB per
+        # example over a vocabulary of 151,936.
+        self.assertEqual(1, self.d["--batch-size"])
+        self.assertEqual(16, self.d["--grad-accum"])
 
     def test_sequence_length_leaves_the_tail_intact(self):
         # the corpus runs to a median of 344 tokens with a tail past 512, so
@@ -67,12 +69,14 @@ class TestTrainingDefaults(unittest.TestCase):
 
     def test_the_worst_case_logits_leave_room_on_the_card(self):
         # the logits dominate the memory: a bf16 copy, an fp32 copy for the
-        # loss, and the gradient of that copy, over a vocabulary of 151,936.
+        # loss, the log-softmax, and the gradients of all of it, over a
+        # vocabulary of 151,936. Measured: about 6 GB per example at 768
+        # tokens, so a batch of two cannot fit on a 12.9 GB card.
         vocab = 151_936
         per_token = vocab * (2 + 4 + 4) / 1e9
         logits_gb = self.d["--batch-size"] * self.d["--max-seq-len"] * per_token
-        # measured: batch 2 at a 512 cap allocated 5.04 GB, of which the
-        # logits are about 1.6 GB
+        # measured: batch 1 at a 768 cap allocated 10.01 GB, of which the
+        # logits and their gradients are about 6
         estimated = logits_gb + 3.5
         self.assertLess(estimated, 12.0,
                         f"the worst case needs about {estimated:.1f} GB")

@@ -296,62 +296,64 @@ Training is the part that needs care, and QLoRA is what makes it work:
 | **QLoRA, NF4 base** | **~2 GB** | ~2 GB | yes, very comfortable |
 
 The default is QLoRA: 4-bit NF4 with double quantisation, rank 32, alpha 64,
-gradient checkpointing, sequence length 768, batch size 2 with 8 gradient
+gradient checkpointing, sequence length 768, batch size 1 with 16 gradient
 accumulation steps (an effective batch of 16), `paged_adamw_8bit`, bf16
 compute, lr 1e-4 on a cosine schedule with 3 % warmup, one epoch.
 
 Those numbers are measured, not chosen. `make speed-test` runs the same data
-through five micro-batch shapes at the same effective batch of 16:
+through five micro-batch shapes at the same effective batch of 16, each shape
+in a process of its own:
 
 ```
-   batch  accum  eff   s/step     tok/s    ex/s  alloc GB  resv GB   frag
-       1     16   16     6.46       814     0.1      3.68     4.33   0.66
-       2      8   16     3.58     1,633     0.6      5.04     7.45   2.41
-       4      4   16    24.40       231     0.2      7.78    13.68   5.90
-       8      2   16    36.36       169     0.2    13.24    26.12  12.88
-      16      1   16    29.04       191     0.6    24.03    27.97   3.93
+   batch  accum  eff   s/step     tok/s    ex/s  alloc GB  resv GB   frag  free GB
+       1     16   16     4.19     1,256     0.2     10.01    12.02   2.00     8.78
+       2      8   16    24.08       218     0.1     16.09    22.42   6.33     8.78   OVER THE CARD
+       4      4   16    out of memory
+       8      2   16    out of memory
+      16      1   16    out of memory
 ```
 
-**The reserved-memory column explains the whole table.** The card has 12.88 GB.
-Every configuration that stays under it is fast; every configuration that
-crosses it is about seven times slower. On Windows, exceeding the card's VRAM
-forces the caching allocator to spill into host memory mapped into the device
-address space, and every access to that crosses PCIe.
+**One shape fits: batch 1.** A batch of two needs **16.09 GB of live
+tensors** on a card with 12.88 GB, so it cannot run at 768 tokens however
+much of the card is free. The reason is the vocabulary: the logits, the
+fp32 copy the loss is computed in, the log-softmax and their gradients come
+to about **6 GB per example** over 151,936 tokens. The model itself is under
+1 GB — the output layer is the whole problem.
 
-So the rule is: **take the fastest row whose reserved memory stays under the
-card.** That is batch 2 with 8-way accumulation — twice as fast as batch 1,
-and seven times faster than batch 4.
-
-That table is also a lesson about measuring. The first version of the speed
-test ran all five shapes in one process, and the caching allocator carried
-its fragmentation from one to the next, so the later rows were measured
-through the earlier ones' mess. The numbers above came from that version;
-the `alloc` column is stable across runs and the `resv` and `tok/s` columns
-are not. **The tool now runs each shape in a process of its own**, and the
-reserved figure it reports is the real one.
+Batch 1 is also the *right* answer rather than merely the only one: at batch
+1 a batch's width is that example's own length, so there is no padding
+waste, and the peak is set by the longest example rather than by the cap.
 
 **The corpus, measured.** 20,000 examples at a mean of 324 tokens, which is
 6.5 M tokens per epoch. 1.0 % of them are longer than the 768-token cap and
 are truncated — down from 2.9 % before the duplication was removed.
 
-**The training budget.** One epoch is somewhere between **75 and 130
-minutes**, depending on how much of the card the run holds. The two
-measurements that bracket it are 1,454 and 818 tokens per second for the same
-configuration; the clean instrument will settle which one is real. Plan
-against the pessimistic end. Two epochs is between two and a half hours and
-four and a half hours.
+**The training budget.** At the measured 1,256 tokens per second, one epoch
+is **about 86 minutes**. Two epochs is about three hours. That measurement
+was taken with 1.3 GB of the card already in use by something else — a
+browser or a container runtime — so close those first and it improves
+slightly.
+
+Measuring this took four attempts and the first three were wrong. The speed
+test ran all five shapes in one process, so the caching allocator carried
+its fragmentation from one to the next. Fixing that, the parent process then
+held a copy of the model on the GPU while its children measured, so every
+row was taken against a card that was already partly full. Both are fixed;
+the `free GB` column reports how much of the card was free when each row
+began, and the shuffle is fixed so every shape draws the same examples. The
+lesson is in [docs/HOW-IT-WORKS.md](docs/HOW-IT-WORKS.md): a number is not a
+measurement until you know what else was running.
 
 Only 1.99 % of the parameters are trainable: 34,865,152 LoRA parameters
 against 1,755,440,128 in total. The frozen base is never updated.
 
-**Measured.** On an RTX 4070 SUPER, at batch 2 with 8-way accumulation, a
-training step takes **3.58 s** and the run holds **5.04 GB** allocated of the
-card's 12.88 GB. That is 1,633 tokens per second.
+**Measured.** On an RTX 4070 SUPER, at batch 1 with 16-way accumulation, a
+training step takes **4.19 s** and the run holds **10.01 GB** allocated of the
+card's 12.88 GB. That is 1,256 tokens per second.
 
-Those numbers are why `make speed-test` exists. An earlier configuration —
-batch 1, 16-way accumulation — ran at 814 tokens per second; batch 4 ran at
-231. The reason turned out to be memory, not arithmetic, and it is written up
-under [When something goes wrong](#when-something-goes-wrong).
+Those numbers are why `make speed-test` exists. The reason a bigger batch
+does not fit is memory, not arithmetic, and it is written up under
+[When something goes wrong](#when-something-goes-wrong).
 
 ---
 
@@ -449,10 +451,17 @@ it has cached, and the parent holds no GPU memory while they run. The
 it is not the whole card, the row is not measuring what it claims to:
 
 ```
-  corpus: 2000 examples, NNN,NNN tokens, mean NNN tokens, median NNN, p95 NNN, max NNN
-  sequence cap: 512 tokens
+  corpus: 2000 examples, 648,588 tokens, mean 324 tokens, median 292, p95 588, max 1205
+  sequence cap: 768 tokens
+  TRUNCATED: 20/2000 examples (1.0%) are cut at the cap.
+  card free at the start: 11.57 GB of 12.88 GB
 
-  batch  accum  eff   s/step     tok/s     ex/s  alloc GB  resv GB   frag
+   batch  accum  eff   s/step     tok/s    ex/s  alloc GB  resv GB   frag  free GB
+       1     16   16     4.19     1,256     0.2     10.01    12.02   2.00     8.78
+       2      8   16    24.08       218     0.1     16.09    22.42   6.33     8.78   OVER THE CARD
+       4      4   16    out of memory
+       8      2   16    out of memory
+      16      1   16    out of memory
 ```
 
 Read it one way or the other. If `s/step` is flat across the rows, the cost
@@ -681,16 +690,23 @@ safe choice.
 If the speed test reports a `resv GB` figure larger than your card's memory,
 the run is spilling into host memory over PCIe, and on Windows that is several
 times slower than staying on the card. The measured table above shows it
-exactly: batch 2 at 7.45 GB reserved is fast, batch 4 at 13.68 GB is seven
-times slower, on the same effective batch and the same tokens.
+exactly: batch 1 at 12.02 GB reserved runs at 1,256 tokens per second, batch
+2 at 22.42 GB reserved runs at 218, on the same effective batch and the same
+tokens.
 
-The lever is the micro-batch, not the batch size as such. The logits
-dominate the memory — a bf16 copy, an fp32 copy for the loss and the
-gradient of that copy, over a vocabulary of 151,936 — and they scale with
-micro-batch × sequence length. Halving the micro-batch halves that term.
+The lever is the micro-batch, and the reason is the vocabulary rather than
+the model. The logits dominate the memory — a bf16 copy, the fp32 copy the
+loss is computed in, the log-softmax, and the gradients of all of it, over
+151,936 tokens — and they cost about **6 GB per example** at 768 tokens. The
+base weights are under 1 GB. The output layer is the whole problem, and it is
+why a batch of two needs 16 GB of live tensors on a card with 12.9.
+
+Halving the micro-batch halves that term, which is the only reason batch 1
+runs at all.
 
 `make speed-test` prints `OVER THE CARD` next to any row that crosses the
-limit, and the header reports how many examples the sequence cap is cutting.
+limit, and the header reports how many examples the sequence cap is cutting
+and how much of the card was free when the run began.
 
 ### The step times swing
 

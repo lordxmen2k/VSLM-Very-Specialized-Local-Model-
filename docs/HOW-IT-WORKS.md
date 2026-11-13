@@ -332,7 +332,7 @@ Three reasons for this arrangement:
 | Adapters | LoRA rank 32, alpha 64, on all seven projections |
 | Trainable | 34,865,152 of 1,755,440,128 parameters — 1.99 % |
 | Sequence length | 768 (the corpus has a median of 344 tokens and a tail past 512) |
-| Batch | 2, with 8-way accumulation — an effective batch of 16 |
+| Batch | 1, with 16-way accumulation — an effective batch of 16 |
 | Gradient checkpointing | on |
 | Optimiser | `paged_adamw_8bit`, lr 1e-4, cosine, 3 % warmup, weight decay 0.01 |
 | Epochs | 1 |
@@ -368,34 +368,40 @@ model sees the same seventeen shapes either way.
 ### The measurement that set the batch size
 
 `make speed-test` runs the same data through five micro-batch shapes at the
-same effective batch of 16, on an RTX 4070 SUPER:
+same effective batch of 16, on an RTX 4070 SUPER, each shape in a process of
+its own:
 
 ```
-   batch  accum  eff   s/step     tok/s    ex/s  alloc GB  resv GB   frag
-       1     16   16     6.87       814     0.1      3.68     4.33   0.66
-       2      8   16     3.58     1,633     0.6      5.04     7.45   2.41
-       4      4   16    24.40       231     0.2      7.78    13.68   5.90
-       8      2   16    36.36       169     0.2    13.24    26.12  12.88
-      16      1   16    29.04       191     0.6    24.03    27.97   3.93
+   batch  accum  eff   s/step     tok/s    ex/s  alloc GB  resv GB   frag  free GB
+       1     16   16     4.19     1,256     0.2     10.01    12.02   2.00     8.78
+       2      8   16    24.08       218     0.1     16.09    22.42   6.33     8.78   OVER THE CARD
+       4      4   16    out of memory
+       8      2   16    out of memory
+      16      1   16    out of memory
 ```
 
-Read the `resv GB` column against the card's 12.88 GB. Batch 1 and batch 2
-stay under it and are fast. Batch 4 crosses it and is **seven times slower**.
-Batch 8 and 16 cross it by a wide margin and are slower still.
+**One shape fits.** A batch of two needs 16.09 GB of live tensors on a card
+with 12.88 GB, so it cannot run at 768 tokens however much of the card is
+free.
 
-The cause is memory, not arithmetic. The logits dominate: a bf16 copy, an
-fp32 copy for the loss, and the gradient of that copy, over a vocabulary of
-151,936. That term scales with micro-batch × sequence length, and once it
-passes the card's physical VRAM the caching allocator spills into host
-memory mapped into the device address space. Every access to it crosses PCIe.
+The cause is the vocabulary, not the model. The base weights are under 1 GB.
+The logits are the whole problem: a bf16 copy, the fp32 copy the loss is
+computed in, the log-softmax, and the gradients of all of it come to about
+**6 GB per example** over 151,936 tokens. That term scales with micro-batch
+× sequence length, and once it passes the card's physical VRAM the caching
+allocator spills into host memory mapped into the device address space.
+Every access to it crosses PCIe, which is why batch 2 measures 218 tokens a
+second instead of 1,256.
 
-**The rule that follows: take the fastest row whose reserved memory stays
-under the card.** Batch 2 with 8-way accumulation, at 1,633 tokens per second,
-twice as fast as batch 1 and seven times faster than batch 4 — on the same
-effective batch and the same tokens, so the training dynamics are identical.
+Batch 1 is also the *right* answer rather than merely the only one. At
+batch 1 a batch's width is that example's own length, so there is no padding
+waste and the peak is set by the longest example rather than by the cap. At
+batch 2 the width is the longest of the two, so the wasted padding is real.
 
-The budget follows directly. The corpus is 7.2 M tokens per epoch, so one
-epoch is **73 minutes**.
+**The budget follows directly.** The corpus is 6.5 M tokens per epoch, so one
+epoch is **about 86 minutes** at 1,256 tokens per second, and two epochs is
+about three hours. That measurement was taken with 1.3 GB of the card
+already in use by something else.
 
 ### The token budget, measured
 

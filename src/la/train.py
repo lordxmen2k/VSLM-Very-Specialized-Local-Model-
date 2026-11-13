@@ -366,16 +366,17 @@ def main(argv=None) -> int:
                          "358 tokens, with a tail past 512. 768 leaves the "
                          "tail intact; make speed-test report how many "
                          "examples the cap is cutting")
-    ap.add_argument("--batch-size", type=int, default=2,
-                    help="examples per forward pass. 2 with grad-accum 8 "
-                         "keeps the effective batch at 16, and measured "
-                         "fastest of the five shapes tried - 1,633 tok/s "
-                         "against 814 at batch 1 and 231 at batch 4, which "
-                         "spills past the card")
+    ap.add_argument("--batch-size", type=int, default=1,
+                    help="examples per forward pass. 1 with grad-accum 16 "
+                         "keeps the effective batch at 16, and is the only "
+                         "shape that fits: at 768 tokens the logits and "
+                         "their gradient cost about 6 GB per example over a "
+                         "vocabulary of 151,936, so a batch of two needs "
+                         "16 GB on a card with 12.9")
     ap.add_argument("--num-workers", type=int, default=0,
                     help="dataloader workers. The corpus is tokenised up "
                          "front, so 0 is usually enough")
-    ap.add_argument("--grad-accum", type=int, default=8,
+    ap.add_argument("--grad-accum", type=int, default=16,
                     help="gradient accumulation. batch-size x grad-accum is "
                          "the effective batch, which is 16 either way")
     ap.add_argument("--warmup-ratio", type=float, default=0.03)
