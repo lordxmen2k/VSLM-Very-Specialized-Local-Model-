@@ -328,14 +328,11 @@ waste, and the peak is set by the longest example rather than by the cap.
 6.5 M tokens per epoch. 1.0 % of them are longer than the 768-token cap and
 are truncated — down from 2.9 % before the duplication was removed.
 
-**The training budget.** The speed test runs seven steps on a card that has
-not warmed up. A real run is two and a half hours of sustained load, and the
-clocks come down. The finished run measured **153 minutes** for 1,250 steps
-— 7.36 s per step against the speed test's 4.19 — so **plan on about two and
-a half hours per epoch**, not the hour and a half the speed test suggests.
-
-The run itself: loss 1.35 → 0.066 over 1,250 steps, 4.36 GB allocated, 704
-tokens per second sustained.
+**The training budget.** The finished run measured **143 minutes** for 1,250
+steps at 885 tokens per second, with the loss going from 1.3258 to 0.0462 and
+a peak of 5.04 GB allocated. The speed test suggests less — it runs seven
+steps on a card that has not warmed up, where a real run is two and a half
+hours of sustained load. **Plan on the measured run, not the speed test.**
 
 **The limit that matters is the allocated column**, not the reserved one.
 That run reserved 13.35 GB on a 12.88 GB card and ran perfectly well, because
