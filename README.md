@@ -563,10 +563,17 @@ assert results learns to assert results.
 
 Every derivation now shows its arithmetic, one line per dot product, and the
 determinant's cofactor sign is written as its own factor so the alternating
-pattern is copyable rather than computed. The corpus grew from 672 to 767
-characters per example and the sequence cap from 768 to 1,024 tokens, which
-takes an epoch from 2.5 hours to 3.0. The full account is in
-[docs/HOW-IT-WORKS.md](docs/HOW-IT-WORKS.md).
+pattern is copyable rather than computed. The same went into the six
+families that are not benchmark tasks: `solve_system` now shows the
+elimination and the back substitution instead of an inverse matrix,
+`least_squares` shows AᵀA and Aᵀb, `lu_factor` shows the elimination,
+`condition_number` shows AᵀA and its eigenvalues, `orthonormal_basis` shows
+the unnormalised vectors and the rescaling, and `projection` shows the ratio
+and each component.
+
+The corpus went from 672 to 826 characters per example and the sequence cap
+from 768 to 1,024 tokens, which takes an epoch from 2.5 hours to 3.2. The
+full account is in [docs/HOW-IT-WORKS.md](docs/HOW-IT-WORKS.md).
 
 ### The published benchmark
 

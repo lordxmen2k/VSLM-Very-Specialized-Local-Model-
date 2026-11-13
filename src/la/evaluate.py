@@ -24,6 +24,11 @@ import sys
 import time
 
 from .answer import check_answer
+
+# Six significant figures is what the corpus states for the rounded
+# families, so the comparison has to be at least that loose. An answer that
+# is off by one in an integer is still rejected.
+EVAL_TOL = 1e-4
 from .inference import generate, load_model
 from .parse import parse_completion, summarise_answer
 from .schema import features_match, spec_features
@@ -67,7 +72,12 @@ def main(argv=None) -> int:
     for row, raw in zip(rows, outs):
         parsed = parse_completion(raw)
         mode = row.get("compare_mode", "exact")
-        res = check_answer(parsed["answer"], row["truth"], mode=mode)
+        # A tolerance, not exact equality: some families state a value
+        # rounded to six significant figures (the singular values, and the
+        # condition number built from them), so a model that reproduces the
+        # same six figures would otherwise be marked wrong.
+        res = check_answer(parsed["answer"], row["truth"], mode=mode,
+                           tol=EVAL_TOL)
         a_ok = bool(res["correct"])
         ans_ok += a_ok
 

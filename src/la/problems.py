@@ -160,6 +160,63 @@ def _dot_product(row, col) -> str:
     return f"{' + '.join(terms)} = {fmt_scalar(total)}"
 
 
+def _doolittle(A):
+    """LU by elimination, recording the multipliers.
+
+    Returns (upper, lower, trace) or None if a pivot is zero, in which case
+    the caller falls back to the terse form. The trace records the entries
+    the multiplier came from, so the derivation can show the division.
+    """
+    n = A.rows
+    data = [[sp.nsimplify(A[i, j]) for j in range(n)] for i in range(n)]
+    lower = sp.eye(n)
+    trace = []
+    for k in range(n):
+        if data[k][k] == 0:
+            return None
+        for i in range(k + 1, n):
+            if data[i][k] == 0:
+                continue
+            factor = sp.nsimplify(data[i][k] / data[k][k])
+            lower[i, k] = factor
+            trace.append((i, factor, k, sp.nsimplify(data[i][k]),
+                          sp.nsimplify(data[k][k])))
+            for j in range(n):
+                data[i][j] = sp.nsimplify(data[i][j] - factor * data[k][j])
+    return sp.Matrix(data), lower, trace
+
+
+def _solve_by_elimination(A, b):
+    """Forward elimination then back substitution, with the work.
+
+    Returns (echelon, trace, x, back) or None if a pivot is zero.
+    """
+    n = A.rows
+    aug = [[sp.nsimplify(A[i, j]) for j in range(n)] + [sp.nsimplify(b[i, 0])]
+           for i in range(n)]
+    trace = []
+    for k in range(n):
+        if aug[k][k] == 0:
+            return None
+        for i in range(k + 1, n):
+            if aug[i][k] == 0:
+                continue
+            factor = sp.nsimplify(aug[i][k] / aug[k][k])
+            trace.append((i, factor, k, sp.nsimplify(aug[i][k]),
+                          sp.nsimplify(aug[k][k])))
+            for j in range(k, n + 1):
+                aug[i][j] = sp.nsimplify(aug[i][j] - factor * aug[k][j])
+    xs: list = [None] * n
+    back = []
+    for i in range(n - 1, -1, -1):
+        rhs = sp.simplify(aug[i][n]
+                          - sum(aug[i][j] * xs[j] for j in range(i + 1, n)))
+        val = sp.simplify(rhs / aug[i][i])
+        xs[i] = val
+        back.append((i, rhs, sp.simplify(aug[i][i]), val))
+    return aug, trace, xs, back
+
+
 def _eliminate(A):
     """Gaussian elimination to upper triangular form, by hand.
 
@@ -391,7 +448,9 @@ def gen_determinant(rng: random.Random) -> Problem | None:
 
 
 def gen_solve_system(rng: random.Random) -> Problem | None:
-    n = rng.choice([2, 2, 3, 3, 4, 5])
+    # no 5x5: the elimination and the back substitution for a 5x5 run past
+    # the sequence cap, and the benchmark does not ask for systems
+    n = rng.choice([2, 2, 3, 3, 4])
     A = _nonsingular(rng, n)
     b = sp.Matrix(n, 1, lambda i, j: rng.randint(-5, 6))
     A, b = _permute_pair(rng, A, b)
@@ -404,10 +463,40 @@ def gen_solve_system(rng: random.Random) -> Problem | None:
     det = sp.simplify(A.det())
     steps.append(f"STEP 1 det(A) = {fmt_scalar(det)} != 0, so A is invertible and "
                  "the solution is unique.")
-    steps.append(f"STEP 2 x = A^{{-1}} b = {fmt_matrix(A.inv())} {fmt_matrix(b)} "
-                 f"= {fmt_matrix(x)}")
     prod = A * x
-    steps.append(f"STEP 3 VERIFY A x = {fmt_matrix(prod)} = b. OK")
+    solved = _solve_by_elimination(A, b)
+    if solved is not None:
+        aug, tr, xs, back = solved
+        steps.append("STEP 2 eliminate below each pivot on the augmented matrix")
+        for (i, factor, k, num, pv) in tr:
+            steps.append(f"  the multiplier for row {i + 1} is "
+                         f"({fmt_scalar(num)})/({fmt_scalar(pv)}) = "
+                         f"{fmt_scalar(factor)}, so row {i + 1} -= "
+                         f"({fmt_scalar(factor)}) * row {k + 1}")
+        echelon = sp.Matrix([[sp.simplify(aug[i][j]) for j in range(n)]
+                              + [sp.simplify(aug[i][n])] for i in range(n)])
+        steps.append(f"STEP 3 the echelon form of [A|b] is {fmt_matrix(echelon)}")
+        step_no = 3
+        for (i, rhs, diag, val) in reversed(back):
+            step_no += 1
+            if i == n - 1:
+                steps.append(f"STEP {step_no} x{n} = {fmt_scalar(rhs)} / "
+                             f"{fmt_scalar(diag)} = {fmt_scalar(val)}")
+            else:
+                terms = " - ".join(
+                    f"({fmt_scalar(sp.simplify(aug[i][j]))})*({fmt_scalar(xs[j])})"
+                    for j in range(i + 1, n))
+                # rhs is already reduced, so the line has to start from the
+                # unreduced right-hand side or it subtracts the known terms
+                # twice
+                steps.append(f"STEP {step_no} x{i + 1} = "
+                             f"({fmt_scalar(sp.simplify(aug[i][n]))} - {terms}) / "
+                             f"{fmt_scalar(diag)} = {fmt_scalar(val)}")
+        steps.append(f"STEP {step_no + 1} VERIFY A x = {fmt_matrix(prod)} = b. OK")
+    else:
+        steps.append(f"STEP 2 x = A^{{-1}} b = {fmt_matrix(A.inv())} "
+                     f"{fmt_matrix(b)} = {fmt_matrix(x)}")
+        steps.append(f"STEP 3 VERIFY A x = {fmt_matrix(prod)} = b. OK")
     scratch = "\n".join(steps)
     rref = A.rref()[0]
     spec = {"kind": "row_echelon",
@@ -499,20 +588,40 @@ def gen_orthonormal_basis(rng: random.Random) -> Problem | None:
     stem = ", ".join(fmt_matrix(v) for v in vecs)
     q = paraphrase("orthonormal_basis", stem, rng)
     steps = ["GIVEN: " + ", ".join(f"v{i+1}" for i in range(k))]
+    # the unnormalised orthogonal vectors, so the derivation can show the
+    # subtraction and the rescaling separately. Gram-Schmidt with
+    # orthonormal=True returns only the unit vectors, and labelling those
+    # "w_i" taught the model that v1 is already a unit vector.
+    W = []
+    for i, vec in enumerate(vecs):
+        w = sp.Matrix(vec)
+        for j in range(i):
+            coef = sp.simplify(vec.dot(Q[:, j]))
+            w = sp.Matrix(sp.simplify(w - coef * Q[:, j]))
+        W.append(w)
+    step_no = 0
     for i in range(k):
+        step_no += 1
         if i == 0:
-            steps.append(f"STEP {i+1} w1 = v1 (there is nothing to subtract yet) "
-                         f"gives w1 = {fmt_matrix(Q[:, i])}")
+            steps.append(f"STEP {step_no} w1 = v1, and nothing has to be "
+                         f"subtracted from it")
         else:
-            steps.append(f"STEP {i+1} w{i+1} = v{i+1} - sum over earlier vectors gives "
-                         f"w{i+1} = {fmt_matrix(Q[:, i])}")
-        # Q[:, i] is already a unit vector, so the squared norm is 1 and no
-        # rescaling is needed. Printing the matrix a second time here was
-        # pure duplication - it made this family the longest in the corpus.
-        steps.append(f"STEP {i+1}b the squared norm of w{i+1} is "
-                     f"{fmt_scalar(sp.simplify(Q[:, i].dot(Q[:, i])))}"
-                     f", so w{i+1} is already a unit vector")
-    steps.append(f"STEP {k+1} VERIFY the vectors are orthonormal. OK")
+            parts = []
+            for j in range(i):
+                coef = sp.simplify(vecs[i].dot(Q[:, j]))
+                parts.append(f"the coefficient of q{j+1} in w{i+1} is "
+                             f"<v{i+1},q{j+1}> = {fmt_scalar(coef)}")
+            steps.append(f"STEP {step_no} " + ", and ".join(parts))
+            steps.append(f"  so w{i+1} = v{i+1} - "
+                         + " - ".join(f"({fmt_scalar(sp.simplify(vecs[i].dot(Q[:, j])))})"
+                                      f"*q{j+1}" for j in range(i))
+                         + f" = {fmt_matrix(W[i])}")
+        nrm = sp.simplify(W[i].norm())
+        step_no += 1
+        steps.append(f"STEP {step_no} the norm of w{i+1} is {fmt_scalar(nrm)}, so "
+                     f"q{i+1} = w{i+1} / ({fmt_scalar(nrm)}) = {fmt_matrix(Q[:, i])}")
+    step_no += 1
+    steps.append(f"STEP {step_no} VERIFY the vectors are orthonormal. OK")
     scratch = "\n".join(s for s in steps if s)
     spec = {"kind": "basis_3d" if n == 3 else "basis_2d",
             "data": {"vectors": [[float(Q[i, j]) for i in range(n)]
@@ -534,12 +643,18 @@ def gen_projection(rng: random.Random) -> Problem | None:
     resid = sp.simplify(v - proj)
     stem = f"v = {fmt_matrix(v)} and w = {fmt_matrix(w)}"
     q = paraphrase("projection", stem, rng)
+    ratio = sp.simplify((v.dot(w)) / (w.dot(w)))
+    comps = [sp.simplify(ratio * w[i]) for i in range(n)]
     steps = ["GIVEN: v, w"]
     steps.append(f"STEP 1 <v, w> = {fmt_scalar(sp.simplify(v.dot(w)))} and "
                  f"<w, w> = {fmt_scalar(sp.simplify(w.dot(w)))}")
-    steps.append(f"STEP 2 proj = (<v,w> / <w,w>) w = {fmt_matrix(proj)}")
-    steps.append(f"STEP 3 residual = v - proj = {fmt_matrix(resid)}")
-    steps.append(f"STEP 4 VERIFY proj + residual = v and proj is parallel to w. OK")
+    steps.append(f"STEP 2 the ratio <v,w>/<w,w> = {fmt_scalar(ratio)}")
+    steps.append(f"STEP 3 proj = ({fmt_scalar(ratio)}) w = "
+                 + ", ".join(f"({fmt_scalar(ratio)})*({fmt_scalar(w[i])})"
+                             for i in range(n))
+                 + f" = {fmt_matrix(sp.Matrix(comps))}")
+    steps.append(f"STEP 4 residual = v - proj = {fmt_matrix(resid)}")
+    steps.append(f"STEP 5 VERIFY proj + residual = v and proj is parallel to w. OK")
     scratch = "\n".join(steps)
     spec = {"kind": "projection",
             "data": {"vector": _vec(v), "projection": _vec(proj),
@@ -570,12 +685,23 @@ def gen_least_squares(rng: random.Random) -> Problem | None:
     resid = sp.simplify(A * x - b)
     stem = f"{fmt_matrix(A)} x = {fmt_matrix(b)}"
     q = paraphrase("least_squares", stem, rng)
+    AtA = sp.Matrix(sp.simplify(A.T * A))
+    Atb = sp.Matrix(sp.simplify(A.T * b))
+    inv = sp.Matrix(AtA.inv())
+    terms = []
+    for i in range(n):
+        parts = [f"({fmt_scalar(inv[i, j])})*({fmt_scalar(Atb[j])})"
+                 for j in range(n)]
+        terms.append(" + ".join(parts))
     steps = [f"GIVEN: A ({m}x{n}), b"]
     steps.append(f"STEP 1 A has full column rank {n}, so the least-squares "
                  "solution is unique.")
-    steps.append(f"STEP 2 x = (A^T A)^{{-1}} A^T b = {fmt_matrix(x)}")
-    steps.append(f"STEP 3 the residual is A x - b = {fmt_matrix(resid)}")
-    steps.append("STEP 4 VERIFY A^T r = 0, so the residual is orthogonal to the "
+    steps.append(f"STEP 2 A^T A = {fmt_matrix(AtA)}")
+    steps.append(f"STEP 3 A^T b = {fmt_matrix(Atb)}")
+    steps.append(f"STEP 4 x = (A^T A)^{{-1}} A^T b = "
+                 + " , ".join(terms) + f" = {fmt_matrix(x)}")
+    steps.append(f"STEP 5 the residual is A x - b = {fmt_matrix(resid)}")
+    steps.append("STEP 6 VERIFY A^T r = 0, so the residual is orthogonal to the "
                  "column space. OK")
     scratch = "\n".join(steps)
     Ax = A * x
@@ -601,9 +727,24 @@ def gen_lu_factor(rng: random.Random) -> Problem | None:
     stem = fmt_matrix(A)
     q = paraphrase("lu_factor", stem, rng)
     steps = ["GIVEN: A"]
-    steps.append(f"STEP 1 eliminate below the first pivot to get L = {fmt_matrix(L)} "
-                 f"and U = {fmt_matrix(U)}")
-    steps.append(f"STEP 2 VERIFY L U = {fmt_matrix(L * U)} = A. OK")
+    got = _doolittle(A)
+    if got is not None:
+        U2, L2, tr = got
+        if (L2 * U2 - A).applyfunc(sp.simplify) == sp.zeros(n):
+            steps.append("STEP 1 eliminate below each pivot; the multiplier "
+                         "goes into L")
+            for (i, factor, k, num, pv) in tr:
+                steps.append(f"  the multiplier for row {i + 1} is "
+                             f"({fmt_scalar(num)})/({fmt_scalar(pv)}) = "
+                             f"{fmt_scalar(factor)}, so row {i + 1} -= "
+                             f"({fmt_scalar(factor)}) * row {k + 1}")
+            steps.append(f"STEP 2 L = {fmt_matrix(L2)} and U = {fmt_matrix(U2)}")
+            steps.append(f"STEP 3 VERIFY L U = {fmt_matrix(L2 * U2)} = A. OK")
+            L, U = L2, U2
+    if len(steps) == 1:
+        steps.append(f"STEP 1 eliminate below the first pivot to get "
+                     f"L = {fmt_matrix(L)} and U = {fmt_matrix(U)}")
+        steps.append(f"STEP 2 VERIFY L U = {fmt_matrix(L * U)} = A. OK")
     scratch = "\n".join(steps)
     spec = {"kind": "row_echelon",
             "data": {"matrix": _mat(A), "echelon": _mat(U)},
@@ -672,11 +813,22 @@ def gen_condition_number(rng: random.Random) -> Problem | None:
     cond_text = f"{cond:.6g}"
     stem = fmt_matrix(A)
     q = paraphrase("condition_number", stem, rng)
+    # The singular values are the square roots of the eigenvalues of A^T A.
+    # Saying so makes the procedure explicit, even though the eigenvalue
+    # step is itself a large one.
+    AtA = sp.Matrix(A.T * A)
+    eig = AtA.eigenvals()
+    squared = sorted([float(sp.re(sp.N(v, 12))) for v in eig],
+                     reverse=True)
     steps = ["GIVEN: A"]
-    steps.append("STEP 1 the singular values of A are "
+    steps.append(f"STEP 1 A^T A = {fmt_matrix(AtA)}")
+    steps.append("STEP 2 the eigenvalues of A^T A are "
+                 + ", ".join(f"{s:.6g}" for s in squared)
+                 + ", so the singular values are their square roots: "
                  + ", ".join(f"{s:.6g}" for s in sv))
-    steps.append(f"STEP 2 cond_2(A) = σ_max / σ_min = {cond_text}")
-    steps.append("STEP 3 VERIFY cond_2(A) >= 1 for an invertible matrix. OK")
+    steps.append(f"STEP 3 cond_2(A) = σ_max / σ_min = "
+                 f"{sv[0]:.6g} / {sv[-1]:.6g} = {cond_text}")
+    steps.append("STEP 4 VERIFY cond_2(A) >= 1 for an invertible matrix. OK")
     scratch = "\n".join(steps)
     spec = {"kind": "matrix_heatmap",
             "data": {"matrix": _mat(A)},

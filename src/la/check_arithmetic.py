@@ -72,7 +72,15 @@ def check_problem(problem) -> list[str]:
         except Exception as exc:
             complaints.append(f"{problem.family}: line {lineno}: cannot compare ({exc})")
             continue
-        if sp.simplify(got - want) != 0:
+        # Some families state a value rounded to six significant figures -
+        # the singular values, and the condition number built from them - so
+        # a division of two rounded numbers is not exactly the rounded
+        # quotient. The tolerance is relative, and far tighter than any
+        # arithmetic mistake the checker is looking for: the cofactor bug
+        # this checker was written for was 8 against 4.
+        diff = abs(complex(sp.N(got - want)))
+        scale = max(1.0, abs(complex(sp.N(want))))
+        if diff > 1e-4 * scale:
             complaints.append(
                 f"{problem.family}: line {lineno}: '{lhs}' = {got}, but the "
                 f"scratchpad says {rhs}")
