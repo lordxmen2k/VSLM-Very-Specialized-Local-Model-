@@ -188,3 +188,32 @@ class TestBenchmarkDataQuality(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestLenientExtraction(unittest.TestCase):
+    """The lenient reading: a model that answers in prose has answered.
+
+    It is a diagnostic, not the benchmark's protocol, and it is reported
+    beside the protocol's number so the two can be compared.
+    """
+
+    def test_it_finds_a_trailing_number(self):
+        from la.grading import extract_last_value
+        self.assertEqual("-40",
+                         extract_last_value("So, the determinant of the matrix A is -40"))
+        self.assertEqual("1.00000",
+                         extract_last_value("So the 2-norm condition number of A is 1.00000"))
+
+    def test_it_finds_a_trailing_matrix(self):
+        from la.grading import extract_last_value
+        got = extract_last_value(
+            "The answer is \\begin{pmatrix} -2 \\\\ -11 \\\\ 3 \\end{pmatrix}")
+        self.assertIn("pmatrix", got)
+
+    def test_it_finds_a_value_after_an_equals_sign(self):
+        from la.grading import extract_last_value
+        self.assertEqual("5", extract_last_value("STEP 1 x = 5"))
+
+    def test_it_gives_up_rather_than_guessing(self):
+        from la.grading import extract_last_value
+        self.assertEqual("", extract_last_value("no numbers here at all"))

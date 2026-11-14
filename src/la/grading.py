@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import re
 
+from .answer import parse_answer
 from .parse import parse_completion
 
 # LinAlg-Bench states the task in the question text - "Find the determinant
@@ -64,6 +65,40 @@ def normalise_reference(answer: str) -> str:
     return a
 
 
+def extract_last_value(raw: str) -> str:
+    """The last line of a response that parses as a value.
+
+    The lenient reading. A model that writes "So, the determinant of the
+    matrix A is -40" has answered; it just did not put the answer where a
+    grader looking for \boxed{} would find it. This is a diagnostic, not
+    the benchmark's protocol, and it is reported beside that number so the
+    two can be compared.
+    """
+    trailing_matrix = re.compile(
+        r"(\\begin\{[a-z]*matrix\}.*?\\end\{[a-z]*matrix\})", re.S)
+    trailing_number = re.compile(r"(-?\d+(?:\.\d+)?)\s*$")
+    for line in reversed([l.strip() for l in (raw or "").splitlines()]):
+        if not line or line.startswith("```"):
+            continue
+        candidates = [line, line.rstrip("."), line.split("=")[-1].strip()]
+        m = trailing_matrix.search(line)
+        if m:
+            candidates.append(m.group(1))
+        m = trailing_number.search(line)
+        if m:
+            candidates.append(m.group(1))
+        for candidate in candidates:
+            candidate = candidate.strip().strip("$ ")
+            if not candidate:
+                continue
+            try:
+                parse_answer(candidate)
+            except Exception:
+                continue
+            return candidate
+    return ""
+
+
 def extract_model_answer(raw: str) -> str:
     """Pull the model's answer out of a completion, whatever shape it took.
 
@@ -82,5 +117,8 @@ def extract_model_answer(raw: str) -> str:
     boxes = extract_boxed(raw)
     if boxes:
         return normalise_reference(boxes[-1])
+    last = extract_last_value(raw)
+    if last:
+        return normalise_reference(last)
     lines = [l.strip() for l in raw.strip().split("\n") if l.strip()]
     return normalise_reference(lines[-1]) if lines else ""
