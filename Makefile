@@ -79,7 +79,13 @@ train:
 
 eval:
 	$(PYTHON) -m la.evaluate --base $(BASE) --adapter $(ADAPTER) \
-		--data $(DATA)/test.jsonl --out $(DATA)/results.jsonl $(EVAL_ARGS)
+		--data $(DATA)/test.jsonl --out $(DATA)/results.jsonl
+
+# the same evaluation with the wrapper the third run was trained on
+eval-training-prompt:
+	$(PYTHON) -m la.evaluate --base $(BASE) --adapter $(ADAPTER) \
+		--data $(DATA)/test.jsonl --prompt-mode training \
+		--out $(DATA)/results_training_prompt.jsonl $(EVAL_ARGS)
 
 # the published comparison: LinAlg-Bench, with the base model as a baseline
 bench:

@@ -46,16 +46,29 @@ def main(argv=None) -> int:
     ap.add_argument("--batch-size", type=int, default=8)
     ap.add_argument("--out", default="", help="write the per-example results here")
     ap.add_argument("--show", type=int, default=8, help="how many failures to print")
+    ap.add_argument("--prompt-mode", choices=["benchmark", "training"],
+                    default="benchmark",
+                    help="benchmark: the bare question, which is what the "
+                         "benchmark asks. training: the wrapper the third "
+                         "run was trained on, which measures the model in "
+                         "distribution. The difference between the two is "
+                         "the cost of the prompt mismatch")
     args = ap.parse_args(argv)
 
     rows = [json.loads(l) for l in open(args.data, encoding="utf-8") if l.strip()]
     if args.limit:
         rows = rows[: args.limit]
-    print(f"{len(rows)} held-out problems from {args.data}")
+    print(f"{len(rows)} held-out problems from {args.data} "
+          f"(prompt: {args.prompt_mode})")
 
     tok, model = load_model(args.base, args.adapter if os.path.isdir(args.adapter) else None)
     t0 = time.time()
-    outs = generate(tok, model, [r["question"] for r in rows],
+    if args.prompt_mode == "training":
+        prompts = [f"### Problem\n{r['question']}\n\n### Scratchpad\n"
+                   for r in rows]
+    else:
+        prompts = [r["question"] for r in rows]
+    outs = generate(tok, model, prompts,
                     max_new_tokens=args.max_new_tokens,
                     temperature=args.temperature, batch_size=args.batch_size)
     print(f"generation took {(time.time()-t0)/60:.1f} min")
