@@ -23,17 +23,17 @@ class TestExplain(unittest.TestCase):
             self.assertEqual(0, proc.returncode, proc.stderr)
             return proc.stdout
 
-    def test_it_reports_the_missing_scratchpads(self):
+    def test_it_reports_the_missing_answers(self):
         out = self._run([
             {"family": "determinant", "raw": "### Scratchpad\nSTEP 1 x\n"
              "### Answer\n7", "answer": "7", "correct": False},
-            {"family": "determinant", "raw": "### Answer\n5", "answer": "5",
-             "correct": False},
+            {"family": "determinant", "raw": "GIVEN: A\nSTEP 1 x = 5",
+             "answer": "", "correct": False},
             {"family": "determinant", "raw": "### Answer\n7", "answer": "7",
              "correct": True},
         ])
         self.assertIn("2 wrong", out)
-        self.assertIn("wrote no scratchpad at all", out)
+        self.assertIn("produced no answer at all", out)
         self.assertIn("50%", out)
         self.assertIn("determinant", out)
 

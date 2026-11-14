@@ -724,7 +724,59 @@ thing, with a token multiplier of two to four depending on the subcategory.
 A test now asserts that no corpus example exceeds the cap, so this cannot
 come back.
 
-## 7. What the benchmark said
+## 7. The run that scored zero
+
+The third run trained beautifully — loss 1.2738 down to 0.0329, half of the
+first run's — and then scored **0/200** on the held-out set. Every problem
+came back `unparseable: empty answer`.
+
+`make explain` showed why, and the completions were not wrong. The model
+computed the singular values correctly, got the projection and its residual
+correctly, and boxed the answers:
+
+```
+5. The final answer is \boxed{\{ 3.60555, 4.24264, 3 \}}.
+```
+
+It was answering in prose with a boxed answer, and the grader was looking
+for an `### Answer` block that the model had never been taught to write in
+that context — because it had been taught to write it after a *different*
+prompt.
+
+Three defects, all of them ours:
+
+**The training prompt and the evaluation prompt were different strings.** The
+corpus's question became the benchmark's prompt, but `train.py` still built
+the training prompt as `### Problem\n{question}\n\n### Scratchpad\n`. So
+the model was trained on a double-wrapped prompt and evaluated on the bare
+one. It was asked at evaluation time to continue something it had never
+seen, and it fell back on base-model behaviour: free prose with a boxed
+answer.
+
+**The evaluation could not read a boxed answer.** It took `parse_completion`
+and used the `### Answer` block, while the benchmark harness used the
+tolerant `extract_model_answer`, which falls back to the last `\boxed{}` and
+then to the last line that looks like an answer. The two graders disagreed
+about what an answer is.
+
+**The training data's answer was not boxed.** `Problem.completion()` boxed
+it; `train.py` assembled its own completion from the row's fields and did
+not. Two definitions of the same format, and the training used the one that
+was wrong.
+
+The fix is one definition of each. The corpus row now carries the prompt and
+the completion, built by the same code that the evaluation reads, and a test
+asserts that the training prompt and the evaluation prompt are the same
+string.
+
+### What the explain tool is for
+
+None of this was visible in a score. The score said zero; the completions
+said the model was right and the grader was deaf. `make explain` is the
+difference between those two readings, and it is the tool to reach for
+whenever a number comes back that cannot be true.
+
+## 8. What the benchmark said
 
 The trained model was scored on all 660 LinAlg-Bench problems, with the base
 model scored on the same problems for the delta.
@@ -808,7 +860,7 @@ the answer out:
 make explain RESULTS=data/bench_linalg.jsonl
 ```
 
-## 8. Reading the benchmark score
+## 9. Reading the benchmark score
 
 ### The grader is the part that was quietly wrong
 

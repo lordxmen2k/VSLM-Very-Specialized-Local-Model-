@@ -24,6 +24,7 @@ import sys
 import time
 
 from .answer import check_answer
+from .grading import extract_model_answer
 
 # Six significant figures is what the corpus states for the rounded
 # families, so the comparison has to be at least that loose. An answer that
@@ -76,8 +77,12 @@ def main(argv=None) -> int:
         # rounded to six significant figures (the singular values, and the
         # condition number built from them), so a model that reproduces the
         # same six figures would otherwise be marked wrong.
-        res = check_answer(parsed["answer"], row["truth"], mode=mode,
-                           tol=EVAL_TOL)
+        # The same tolerant extraction the benchmark uses: the answer block
+        # if the model wrote one, otherwise the last \boxed{}, otherwise the
+        # last line that looks like an answer. A model that answers in prose
+        # with a boxed answer is answering, and the grader has to read it.
+        answer = extract_model_answer(raw)
+        res = check_answer(answer, row["truth"], mode=mode, tol=EVAL_TOL)
         a_ok = bool(res["correct"])
         ans_ok += a_ok
 
@@ -88,17 +93,17 @@ def main(argv=None) -> int:
         kind_ok += g_kind
         plot_ok += g_val
 
-        said_no = ("cannot" in parsed["answer"].lower()
-                   or "not enough information" in parsed["answer"].lower()
-                   or "insufficient" in parsed["answer"].lower())
+        said_no = ("cannot" in answer.lower()
+                   or "not enough information" in answer.lower()
+                   or "insufficient" in answer.lower())
         abstain += said_no
-        if not parsed["answer"]:
+        if not answer:
             unparseable += 1
 
         fam = row["family"]
         per_family.setdefault(fam, []).append(int(a_ok))
         rec = {"family": fam, "question": row["question"], "raw": raw,
-               "answer": parsed["answer"], "correct": a_ok,
+               "answer": answer, "correct": a_ok,
                "reason": res["reason"], "plot_kind_ok": g_kind,
                "plot_value_ok": g_val, "abstained": said_no}
         records.append(rec)

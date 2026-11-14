@@ -106,6 +106,39 @@ class TestBenchmarkPromptFormat(unittest.TestCase):
                              f"the longest corpus example is about "
                              f"{worst / 2.04:.0f} tokens, over the {cap} cap")
 
+    def test_the_training_prompt_and_the_evaluation_prompt_are_the_same(self):
+        """They used to be different, and the model was answering a prompt it
+        had never been trained on.
+
+        The corpus's question is the benchmark's prompt, but train.py used to
+        wrap it in "### Problem\n...\n### Scratchpad\n" while the
+        evaluation passed the bare question. The model was therefore asked at
+        evaluation time to continue something it had never seen, and it fell
+        back on base-model behaviour: free prose with a boxed answer instead
+        of the format it was trained on.
+
+        The prompt and the completion now live in the corpus row, so there is
+        one definition of each, and this test pins them together.
+        """
+        import random
+        from la.benchprompt import model_prompt as build_prompt
+        rng = random.Random(31)
+        p = None
+        for _ in range(40):
+            p = GENERATORS["determinant"](rng)
+            if p is not None:
+                break
+        row = p.to_json()
+        self.assertEqual(row["prompt"], build_prompt(row["question"]),
+                         "the training prompt and the evaluation prompt differ")
+        self.assertEqual(row["prompt"], row["question"],
+                         "the prompt should be the question, not a wrapper "
+                         "around it")
+        self.assertIn("### Answer", row["completion"])
+        self.assertIn("\\boxed{", row["completion"],
+                      "the answer must be boxed, because the benchmark asks "
+                      "for it that way")
+
     def test_the_task_is_spelled_once(self):
         for size in ("3", "4", "5", "3x3", "4x4"):
             t = task_for("determinant", size)

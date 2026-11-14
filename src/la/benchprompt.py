@@ -167,6 +167,18 @@ def build_prompt(task: str, problem: str) -> str:
     return f"{PREAMBLE}\n\n{task}\n\n{problem}\n\n"
 
 
+def model_prompt(question: str) -> str:
+    """The prompt the local model is given.
+
+    The corpus's questions already carry the preamble, the task, the body
+    and the closing instruction, so a question is its own prompt. This
+    lives here, with the rest of the prompt protocol, so that the training
+    and the evaluation cannot drift apart: the corpus row's prompt and this
+    function must return the same string.
+    """
+    return question
+
+
 def body_hint(subcat: str) -> str:
     """The closing instruction for a family."""
     return BODY_HINTS.get(normalise_subcat(subcat),

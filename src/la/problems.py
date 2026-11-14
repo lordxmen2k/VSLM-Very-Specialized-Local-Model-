@@ -54,6 +54,15 @@ class Problem:
     def to_json(self) -> dict:
         d = asdict(self)
         d["tags"] = list(self.tags)
+        # the prompt and the completion go into the row, so that the
+        # training and the evaluation cannot disagree about what the model is
+        # given and what it is expected to write. They used to be assembled
+        # separately in train.py, and they disagreed: the training prompt
+        # wrapped the question in "### Problem" while the evaluation passed
+        # the bare question, so the model was asked to answer a prompt it
+        # had never been trained on.
+        d["prompt"] = self.prompt()
+        d["completion"] = self.completion()
         return d
 
     @staticmethod

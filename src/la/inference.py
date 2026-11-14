@@ -43,13 +43,7 @@ def load_model(base: str, adapter: str | None = None, dtype=torch.bfloat16):
     return tok, model
 
 
-def build_prompt(question: str) -> str:
-    """The prompt the model is given.
-
-    The corpus's questions already carry the benchmark's preamble, the task,
-    the body and the closing instruction, so a question is its own prompt.
-    """
-    return question
+from .benchprompt import model_prompt as build_prompt
 
 
 def generate(tok, model, questions: list[str], max_new_tokens: int = 1024,

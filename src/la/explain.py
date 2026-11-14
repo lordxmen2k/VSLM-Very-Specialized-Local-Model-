@@ -28,6 +28,9 @@ def _split(raw: str) -> dict:
     out["has_scratchpad"] = "### Scratchpad" in raw
     out["has_answer"] = "### Answer" in raw
     out["has_plot"] = "### Plot" in raw
+    # a completion that answers in prose with a boxed answer is still an
+    # answer, so count that too
+    out["has_boxed"] = "\\boxed{" in raw
     lines = raw.splitlines()
     out["scratchpad_lines"] = len(lines)
     out["steps"] = sum(1 for l in lines if l.strip().startswith("STEP"))
@@ -60,10 +63,11 @@ def main(argv=None) -> int:
 
     # the headline diagnostic
     no_scratch = [r for r in failures if not _split(r.get("raw", ""))["has_scratchpad"]]
-    no_answer = [r for r in failures if not _split(r.get("raw", ""))["has_answer"]]
-    print(f"  of the failures, {len(no_scratch)} wrote no scratchpad at all "
-          f"({100*len(no_scratch)/max(len(failures),1):.0f}%)")
-    print(f"  and {len(no_answer)} wrote no answer block "
+    no_answer = [r for r in failures
+                 if not (_split(r.get("raw", ""))["has_answer"]
+                         or _split(r.get("raw", ""))["has_boxed"])]
+    print(f"  of the failures, {len(no_answer)} produced no answer at all - "
+          f"neither an answer block nor a boxed answer "
           f"({100*len(no_answer)/max(len(failures),1):.0f}%)")
     steps = [_split(r.get("raw", ""))["steps"] for r in failures]
     if steps:

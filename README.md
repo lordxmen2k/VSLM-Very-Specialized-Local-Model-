@@ -508,10 +508,15 @@ make explain
 ```
 
 Reads the per-example results that `make eval` writes and says, for the
-questions the model got wrong, whether it wrote a derivation at all. That
-distinction is the one that matters after a training run: a model that emits
-a derivation and gets the arithmetic wrong is a different problem from one
-that jumps straight to the answer.
+questions the model got wrong, whether it produced an answer at all, and
+prints the completions.
+
+**Reach for this whenever a score comes back that cannot be true.** The third
+training run had the best loss of the three — 0.0329 — and scored 0/200 on the
+held-out set. The completions showed the model computing the right answers and
+boxing them; the grader was looking for an `### Answer` block, because the
+training had used a different prompt from the evaluation. No score would have
+shown that. The completions did, immediately.
 
 ```
   of the failures, 128 wrote no scratchpad at all (64%)
