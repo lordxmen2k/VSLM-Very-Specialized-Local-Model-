@@ -52,6 +52,9 @@ def main(argv=None) -> int:
         print(f"no such file: {args.results}\nrun `make eval` first.")
         return 1
 
+    # the held-out set names the family; the benchmark names the task
+    for r in records:
+        r.setdefault("family", r.get("task", "?"))
     failures = [r for r in records if not r.get("correct")]
     print(f"{len(records)} records, {len(failures)} wrong\n")
 
@@ -89,7 +92,9 @@ def main(argv=None) -> int:
             print("\n" + "=" * 70)
             print(f"  {family}   {r.get('reason','')}")
             print("=" * 70)
-            print("  Q:", (r.get("question") or "")[:200].replace("\n", " "))
+            q = (r.get("question") or "").replace("\n", " ")
+            print(f"  size: {r.get('size', '-')}")
+            print("  Q:", q[:200])
             print()
             for line in (r.get("raw") or "").splitlines()[: args.lines]:
                 print("   ", line[:160])

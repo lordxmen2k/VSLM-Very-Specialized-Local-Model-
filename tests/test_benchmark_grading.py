@@ -156,3 +156,35 @@ class TestBenchmarkGrading(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestBenchmarkDataQuality(unittest.TestCase):
+    """LinAlg-Bench's 4x4 file states no task at all.
+
+    Its questions are a bare matrix with no instruction, while the 3x3 and
+    5x5 files say "Find the determinant of the 4x4 matrix A" and "Show all
+    intermediate steps". Nothing tells the model, or the grader, what is being
+    asked, so every 4x4 problem is unanswerable as written and every model
+    scores near zero on that column. It is a property of the data.
+    """
+
+    def test_the_four_by_four_problems_state_no_task(self):
+        from la.grading import is_instructed
+        for size in ("3x3", "4x4", "5x5"):
+            text = _fetch(size)
+            rows = list(csv.DictReader(io.StringIO(text)))
+            instructed = sum(1 for r in rows
+                             if is_instructed(r["problem_latex"]))
+            if size == "4x4":
+                self.assertEqual(0, instructed,
+                                 "expected the 4x4 problems to carry no "
+                                 "instruction; if the benchmark has been "
+                                 "fixed, this note should come out")
+            else:
+                self.assertEqual(len(rows), instructed,
+                                 f"expected every {size} problem to say what "
+                                 f"it wants")
+
+
+if __name__ == "__main__":
+    unittest.main()

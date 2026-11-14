@@ -36,7 +36,7 @@ import time
 import urllib.request
 
 from .answer import answers_equal, parse_answer
-from .grading import extract_model_answer, normalise_reference
+from .grading import extract_model_answer, is_instructed, normalise_reference
 from .inference import generate, load_model, parse_completion
 
 # Accuracy on LinAlg-Bench by matrix size, as published in the benchmark's
@@ -107,7 +107,8 @@ def fetch_linalg(cache_dir: str = "bench_cache") -> list[dict]:
                 if not q or not a:
                     continue
                 problems.append({"size": size, "question": q, "answer": a,
-                                 "id": _pick(row, "id"), "task": _pick(row, "task")})
+                                 "id": _pick(row, "id"), "task": _pick(row, "task"),
+                                 "instructed": is_instructed(q)})
     return problems
 
 
@@ -133,7 +134,8 @@ def score(problems: list[dict], outs: list[str]) -> dict:
         per_task.setdefault(p.get("task") or "?", []).append(int(ok))
         records.append({"size": p["size"], "task": p.get("task"), "id": p.get("id"),
                         "question": p["question"], "reference": p["answer"],
-                        "model_answer": got, "correct": bool(ok)})
+                        "model_answer": got, "correct": bool(ok),
+                        "raw": raw})
     return {"per_size": per_size, "per_task": per_task, "unparsed": unparsed,
             "records": records}
 
@@ -144,6 +146,14 @@ def report(res: dict, label: str, problems: list[dict]) -> None:
     print("\n" + "=" * 72)
     print(f"  {label}")
     print("=" * 72)
+    unasked = [p for p in problems if not p.get("instructed", True)]
+    if unasked:
+        sizes = sorted({p["size"] for p in unasked})
+        print(f"  NOTE: {len(unasked)} of these problems state no task at all -")
+        print(f"        the {', '.join(sizes)} questions in LinAlg-Bench are a bare")
+        print("        matrix with no instruction. Nothing tells the model what is")
+        print("        being asked, so a score on that column measures the data,")
+        print("        not the model. Every model scores near zero there.")
     print(f"  {'size':<8}{'n':>6}{'correct':>10}{'accuracy':>12}")
     for size in ("3x3", "4x4", "5x5"):
         v = per_size.get(size)
@@ -239,7 +249,10 @@ def main(argv=None) -> int:
 
     if args.baseline:
         print("\nscoring the base model with no adapter, for the delta ...")
-        del model
+        # the fine-tuned model is freed to make room, but the perf section
+        # below still wants one, so it is kept unless perf is not asked for
+        if not args.perf:
+            del model
         import torch
         torch.cuda.empty_cache()
         tok2, base_model = load_model(args.base, None)
@@ -250,6 +263,8 @@ def main(argv=None) -> int:
         print(f"generation took {(time.time()-t0)/60:.1f} min")
         bres = score(problems, base_outs)
         report(bres, "base model, no adapter", problems)
+        del base_model
+        torch.cuda.empty_cache()
         fa = res["per_size"]
         ba = bres["per_size"]
         print("\n  delta (fine-tuned minus base)")

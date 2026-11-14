@@ -9,6 +9,20 @@ import re
 
 from .parse import parse_completion
 
+# LinAlg-Bench states the task in the question text - "Find the determinant
+# of the 4x4 matrix A", and "Show all intermediate steps". The 4x4 file has
+# neither: its questions are a bare matrix with no instruction at all, so
+# nothing tells the model, or the grader, what is being asked. Every 4x4
+# problem in the benchmark is unanswerable as written. That is a property of
+# the data, not of the model.
+INSTRUCTION_RE = re.compile(r"\b(find|compute|calculate|evaluate|determine)\b",
+                            re.IGNORECASE)
+
+
+def is_instructed(question: str) -> bool:
+    """Does this question say what it wants?"""
+    return INSTRUCTION_RE.search(question) is not None
+
 
 def extract_boxed(text: str) -> list[str]:
     """Every \\boxed{...} in the text, with the braces balanced.

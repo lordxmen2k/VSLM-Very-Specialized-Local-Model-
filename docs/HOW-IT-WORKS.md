@@ -636,7 +636,91 @@ singular values, and the condition number built from them — so a model that
 reproduces the same six figures was being marked wrong. An answer that is
 off by one in an integer is still rejected.
 
-## 6. Reading the benchmark score
+## 6. What the benchmark said
+
+The trained model was scored on all 660 LinAlg-Bench problems, with the base
+model scored on the same problems for the delta.
+
+| | fine-tuned | base | delta |
+|---|---|---|---|
+| 3×3 | 29.5 % | 65.0 % | **−35.5 points** |
+| 4×4 | 0.0 % | 0.0 % | 0.0 |
+| 5×5 | 21.4 % | 23.6 % | −2.3 |
+| overall | 17.0 % | 29.5 % | −12.5 |
+
+Two things in that table are about the data, and one is about the model.
+
+### The 4×4 column measures the benchmark, not the model
+
+Every model — the fine-tuned one and the base one — scores exactly zero on
+the 4×4 problems. That is not a model failing; it is the benchmark failing.
+
+The 3×3 and 5×5 questions say what they want:
+
+```
+Find the determinant of the 3×3 matrix A.
+
+A = \begin{bmatrix} -3 & 5 & 1 \\ -2 & -3 & 9 \\ 1 & 1 & -6 \end{bmatrix}
+
+Show all intermediate steps. Put your final numerical answer inside \boxed{}.
+```
+
+The 4×4 questions are a bare matrix with no instruction at all:
+
+```
+A = \begin{bmatrix} -4 & 1 & 5 & 3 \\ -1 & -2 & 0 & -3 \\ 1 & -5 & 4 & 2 \\ -5 & 2 & -1 & -4 \end{bmatrix}
+```
+
+Nothing in that text says whether to compute the determinant, the trace, the
+rank or the eigenvalues. The task is in the CSV's `Subcat` column, which the
+model never sees. **All 220 of the 4×4 problems are unanswerable as
+written**, and a score on that column is a score on the data.
+
+`la.grading.is_instructed` detects this, the benchmark report says how many
+problems are affected, and
+`tests/test_benchmark_grading.py::test_the_four_by_four_problems_state_no_task`
+checks it against the real data. If the benchmark is ever fixed, that test
+fails and the note in the report comes out with it.
+
+### The 3×3 regression is about the question, not the mathematics
+
+The fine-tuned model is 35.5 points worse than the base model at 3×3, and the
+per-task breakdown says exactly where:
+
+| task | fine-tuned | base | our corpus trains this with |
+|---|---|---|---|
+| determinant | 1/150 | 25/150 | a derivation |
+| matrix_vector | 3/60 | 31/60 | a derivation |
+| multiplication | 3/60 | 13/60 | a derivation |
+| matrix_power | 1/60 | 14/60 | a derivation |
+| eigenvalue | 1/90 | 7/90 | a derivation |
+| trace | 35/60 | 38/60 | one line |
+| transpose | 40/60 | 37/60 | one line |
+| rank | 14/60 | 16/60 | one line |
+| nullity | 14/60 | 14/60 | one line |
+
+**The regression is on precisely the tasks whose derivations were expanded.**
+The tasks with a one-line answer are flat or slightly better.
+
+And the held-out set — our own questions, our own phrasings — went the other
+way: `matrix_vector` went from 15 % to 54 % when the derivations were
+expanded. So the derivation training helps on the phrasing it was trained on
+and hurts on the benchmark's phrasing.
+
+The benchmark asks for the answer inside `\boxed{}` and adds "Show all
+intermediate steps". Our corpus asks for a `### Answer` block and shows the
+work in a particular shape. The model has learned our question format, and
+the benchmark's is out of distribution for it.
+
+The raw completions settle which of the two mechanisms it is — a format
+mismatch in the answer block, or a derivation that runs long enough to crowd
+the answer out:
+
+```bash
+make explain RESULTS=data/bench_linalg.jsonl
+```
+
+## 7. Reading the benchmark score
 
 ### The grader is the part that was quietly wrong
 

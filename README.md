@@ -598,6 +598,23 @@ full account is in [docs/HOW-IT-WORKS.md](docs/HOW-IT-WORKS.md).
 
 ### The published benchmark
 
+> **Read the 4×4 column with care.** LinAlg-Bench's 4×4 questions are a bare
+> matrix with **no instruction at all** — while the 3×3 and 5×5 questions say
+> "Find the determinant of the 3×3 matrix A" and "Show all intermediate
+> steps". Nothing tells the model what is being asked, so every model scores
+> near zero there; the fine-tuned one and the base one both score exactly
+> 0/220. That column measures the data, not the model. The report says so,
+> and a test checks it against the real files.
+>
+> The fine-tuned model also scored **35.5 points below the base model at
+> 3×3** — and the per-task breakdown shows the regression is entirely on the
+> tasks whose derivations were expanded, while the one-line-answer tasks are
+> flat. The held-out set, with our own phrasings, went the other way. That
+> is a question-format distribution shift, and the raw completions are what
+> will settle it. See
+> [docs/HOW-IT-WORKS.md](docs/HOW-IT-WORKS.md#what-the-benchmark-said).
+
+
 > **The grader was wrong before the model was.** Three separate bugs in the
 > grading harness would have made correct answers score zero: the answer
 > grammar had no rule for a bare comma-separated list, so all ninety

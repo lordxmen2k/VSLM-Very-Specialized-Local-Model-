@@ -49,3 +49,29 @@ class TestExplain(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestExplainOnBenchmarkRecords(unittest.TestCase):
+    """The benchmark records use 'task' where the held-out set uses 'family'."""
+
+    def test_it_reads_both_shapes(self):
+        import json
+        import os
+        import subprocess
+        import sys
+        import tempfile
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "bench.jsonl")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(json.dumps({
+                    "size": "3x3", "task": "determinant", "question": "q",
+                    "reference": "4", "model_answer": "4", "correct": False,
+                    "raw": "### Scratchpad\nSTEP 1 x\n### Answer\n4"}) + "\n")
+            env = dict(os.environ)
+            env["PYTHONPATH"] = os.path.join(root, "src")
+            proc = subprocess.run([sys.executable, "-m", "la.explain", path],
+                                  capture_output=True, text=True, env=env, cwd=root)
+            self.assertEqual(0, proc.returncode, proc.stderr)
+            self.assertIn("determinant", proc.stdout)
+            self.assertIn("3x3", proc.stdout)
