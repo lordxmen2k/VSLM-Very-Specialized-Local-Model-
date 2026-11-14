@@ -368,11 +368,13 @@ def main(argv=None) -> int:
     ap.add_argument("--lr", type=float, default=1e-4)
     ap.add_argument("--rank", type=int, default=32)
     ap.add_argument("--alpha", type=int, default=64)
-    ap.add_argument("--max-seq-len", type=int, default=1024,
+    ap.add_argument("--max-seq-len", type=int, default=1536,
                     help="the derivations show their arithmetic, so the long "
-                         "tail runs past 768 tokens. 1024 clears it; make "
-                         "speed-test report how many examples the cap is "
-                         "cutting")
+                         "tail runs past a thousand tokens. At 1024, 3.9 per "
+                         "cent of the corpus was being cut short, and the "
+                         "model learned to stop before the plot block. 1536 "
+                         "clears it; make speed-test reports how many "
+                         "examples the cap is still cutting")
     ap.add_argument("--batch-size", type=int, default=1,
                     help="examples per forward pass. 1 with grad-accum 16 "
                          "keeps the effective batch at 16, and is the only "

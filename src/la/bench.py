@@ -36,7 +36,8 @@ import time
 import urllib.request
 
 from .answer import answers_equal, parse_answer
-from .grading import extract_model_answer, is_instructed, normalise_reference
+from .benchprompt import build_benchmark_prompt, has_task
+from .grading import extract_model_answer, normalise_reference
 from .inference import generate, load_model, parse_completion
 
 # Accuracy on LinAlg-Bench by matrix size, as published in the benchmark's
@@ -106,9 +107,11 @@ def fetch_linalg(cache_dir: str = "bench_cache") -> list[dict]:
                 a = _pick(row, "answer")
                 if not q or not a:
                     continue
+                subcat = _pick(row, "task")
                 problems.append({"size": size, "question": q, "answer": a,
-                                 "id": _pick(row, "id"), "task": _pick(row, "task"),
-                                 "instructed": is_instructed(q)})
+                                 "id": _pick(row, "id"), "task": subcat,
+                                 "instructed": has_task(q),
+                                 "prompt": build_benchmark_prompt(q, subcat, size)})
     return problems
 
 
@@ -217,7 +220,7 @@ def main(argv=None) -> int:
     ap.add_argument("--baseline", action="store_true",
                     help="also score the base model with no adapter, for the delta")
     ap.add_argument("--perf", action="store_true", help="measure speed and memory")
-    ap.add_argument("--max-new-tokens", type=int, default=1024)
+    ap.add_argument("--max-new-tokens", type=int, default=2048)
     ap.add_argument("--batch-size", type=int, default=8)
     ap.add_argument("--temperature", type=float, default=0.0)
     ap.add_argument("--out", default="")
@@ -240,7 +243,7 @@ def main(argv=None) -> int:
     adapter = args.adapter if os.path.isdir(args.adapter) else None
     tok, model = load_model(args.base, adapter)
     t0 = time.time()
-    outs = generate(tok, model, [p["question"] for p in problems],
+    outs = generate(tok, model, [p["prompt"] for p in problems],
                     max_new_tokens=args.max_new_tokens,
                     temperature=args.temperature, batch_size=args.batch_size)
     print(f"generation took {(time.time()-t0)/60:.1f} min")
@@ -257,7 +260,7 @@ def main(argv=None) -> int:
         torch.cuda.empty_cache()
         tok2, base_model = load_model(args.base, None)
         t0 = time.time()
-        base_outs = generate(tok2, base_model, [p["question"] for p in problems],
+        base_outs = generate(tok2, base_model, [p["prompt"] for p in problems],
                              max_new_tokens=args.max_new_tokens,
                              temperature=args.temperature, batch_size=args.batch_size)
         print(f"generation took {(time.time()-t0)/60:.1f} min")

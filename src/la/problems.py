@@ -33,7 +33,7 @@ from typing import Any, Callable
 import sympy as sp
 
 from .answer import fmt_matrix, fmt_pairs, fmt_scalar, fmt_set
-from .augment import paraphrase, permute_rows, similarity_transform
+from .augment import paraphrase, permute_rows, question, similarity_transform
 
 sp.Matrix  # noqa: B018  (keep the import used)
 
@@ -67,11 +67,18 @@ class Problem:
         )
 
     def prompt(self) -> str:
-        return f"### Problem\n{self.question}\n\n### Scratchpad\n"
+        """The prompt the model is given.
+
+        The question already carries the benchmark's preamble, the task and
+        the body, so it is passed through as it stands.
+        """
+        return self.question
 
     def completion(self) -> str:
         plot = _spec_json(self.spec)
-        return (f"{self.scratchpad}\n### Answer\n{self.answer}\n"
+        # the answer is boxed, because the benchmark asks for it that way and
+        # the model should be fluent in the format it is scored in
+        return (f"{self.scratchpad}\n### Answer\n\\boxed{{{self.answer}}}\n"
                 f"### Plot\n{plot}\n")
 
 
@@ -397,8 +404,8 @@ def gen_determinant(rng: random.Random) -> Problem | None:
     det = sp.simplify(A.det())
     if det == 0:
         return None
-    stem = fmt_matrix(A)
-    q = paraphrase("determinant", stem, rng)
+    stem = f"A = {fmt_matrix(A)}"
+    q = question("determinant", paraphrase("determinant", rng, f"{n}x{n}"), stem)
     steps = ["GIVEN: A"]
     step_no = 0
 
@@ -497,8 +504,8 @@ def gen_solve_system(rng: random.Random) -> Problem | None:
     x = A.LUsolve(b)
     if any(v.free_symbols for v in x):
         return None
-    stem = f"{fmt_matrix(A)} x = {fmt_matrix(b)}"
-    q = paraphrase("solve_system", stem, rng)
+    stem = f"A = {fmt_matrix(A)}\n\nx = {fmt_matrix(b)}"
+    q = question("solve_system", paraphrase("solve_system", rng, f"{n}x{n}"), stem)
     steps = ["GIVEN: A, b"]
     det = sp.simplify(A.det())
     steps.append(f"STEP 1 det(A) = {fmt_scalar(det)} != 0, so A is invertible and "
@@ -558,8 +565,8 @@ def gen_eigenvalues(rng: random.Random) -> Problem | None:
     vals = [sp.simplify(v) for v in actual]
     if len(set(map(str, vals))) != n:
         return None
-    stem = fmt_matrix(A)
-    q = paraphrase("eigenvalues", stem, rng)
+    stem = f"A = {fmt_matrix(A)}"
+    q = question("eigenvalues", paraphrase("eigenvalues", rng, f"{n}x{n}"), stem)
     steps = ["GIVEN: A"]
     char = A.charpoly().as_expr()
     steps.append(f"STEP 1 the characteristic polynomial is p(λ) = {sp.sstr(char)}")
@@ -588,8 +595,9 @@ def gen_diagonalize(rng: random.Random) -> Problem | None:
     A = sp.Matrix(_matrix_with_eigenvalues(rng, eigs))
     A = similarity_transform(rng, A)
     D = sp.diag(*[sp.simplify(v) for v in A.eigenvals()])
-    stem = fmt_matrix(A)
-    q = paraphrase("diagonalize", stem, rng)
+    stem = f"A = {fmt_matrix(A)}"
+    q = question("diagonalize",
+                 paraphrase("diagonalize", rng, f"{A.rows}x{A.cols}"), stem)
     steps = ["GIVEN: A"]
     steps.append("STEP 1 the eigenvalues of A are "
                  + ", ".join(fmt_scalar(v) for v in D.diagonal()) )
@@ -625,8 +633,8 @@ def gen_orthonormal_basis(rng: random.Random) -> Problem | None:
         return None
     # GramSchmidt returns a list of column vectors; hstack them into n x k
     Q = sp.Matrix(sp.Matrix.hstack(*Q_cols))
-    stem = ", ".join(fmt_matrix(v) for v in vecs)
-    q = paraphrase("orthonormal_basis", stem, rng)
+    stem = "\n\n".join(f"v{i+1} = {fmt_matrix(v)}" for i, v in enumerate(vecs))
+    q = question("orthonormal_basis", paraphrase("orthonormal_basis", rng, f"{n}x{n}"), stem)
     steps = ["GIVEN: " + ", ".join(f"v{i+1}" for i in range(k))]
     # the unnormalised orthogonal vectors, so the derivation can show the
     # subtraction and the rescaling separately. Gram-Schmidt with
@@ -681,8 +689,8 @@ def gen_projection(rng: random.Random) -> Problem | None:
         return None
     proj = sp.simplify((v.dot(w)) / (w.dot(w)) * w)
     resid = sp.simplify(v - proj)
-    stem = f"v = {fmt_matrix(v)} and w = {fmt_matrix(w)}"
-    q = paraphrase("projection", stem, rng)
+    stem = f"v = {fmt_matrix(v)}\n\nw = {fmt_matrix(w)}"
+    q = question("projection", paraphrase("projection", rng, f"{n}x{n}"), stem)
     ratio = sp.simplify((v.dot(w)) / (w.dot(w)))
     comps = [sp.simplify(ratio * w[i]) for i in range(n)]
     steps = ["GIVEN: v, w"]
@@ -723,8 +731,8 @@ def gen_least_squares(rng: random.Random) -> Problem | None:
     x = (A.T * A).inv() * A.T * b
     x = sp.Matrix(n, 1, lambda i, j: sp.simplify(x[i, j]))
     resid = sp.simplify(A * x - b)
-    stem = f"{fmt_matrix(A)} x = {fmt_matrix(b)}"
-    q = paraphrase("least_squares", stem, rng)
+    stem = f"A = {fmt_matrix(A)}\n\nb = {fmt_matrix(b)}"
+    q = question("least_squares", paraphrase("least_squares", rng, f"{m}x{n}"), stem)
     AtA = sp.Matrix(sp.simplify(A.T * A))
     Atb = sp.Matrix(sp.simplify(A.T * b))
     inv = sp.Matrix(AtA.inv())
@@ -764,8 +772,8 @@ def gen_lu_factor(rng: random.Random) -> Problem | None:
     A = _nonsingular(rng, n)
     L, U, perm = A.LUdecomposition()
     L, U = sp.Matrix(L), sp.Matrix(U)
-    stem = fmt_matrix(A)
-    q = paraphrase("lu_factor", stem, rng)
+    stem = f"A = {fmt_matrix(A)}"
+    q = question("lu_factor", paraphrase("lu_factor", rng, f"{n}x{n}"), stem)
     steps = ["GIVEN: A"]
     got = _doolittle(A)
     if got is not None:
@@ -823,8 +831,8 @@ def gen_svd(rng: random.Random) -> Problem | None:
     n = rng.choice([2, 3])
     A, svals = _matrix_with_singular_values(rng, n)
     vals = [sp.Integer(s) for s in svals]
-    stem = fmt_matrix(A)
-    q = paraphrase("svd", stem, rng)
+    stem = f"A = {fmt_matrix(A)}"
+    q = question("svd", paraphrase("svd", rng, f"{n}x{n}"), stem)
     steps = ["GIVEN: A"]
     steps.append("STEP 1 the eigenvalues of A^T A are "
                  + ", ".join(str(s * s) for s in svals))
@@ -851,8 +859,8 @@ def gen_condition_number(rng: random.Random) -> Problem | None:
     sv = np.sort(sv)[::-1]
     cond = float(sv[0] / sv[-1])
     cond_text = f"{cond:.6g}"
-    stem = fmt_matrix(A)
-    q = paraphrase("condition_number", stem, rng)
+    stem = f"A = {fmt_matrix(A)}"
+    q = question("condition_number", paraphrase("condition_number", rng, f"{n}x{n}"), stem)
     # The singular values are the square roots of the eigenvalues of A^T A.
     # Saying so makes the procedure explicit, even though the eigenvalue
     # step is itself a large one.
@@ -890,8 +898,8 @@ def gen_rank_nullspace(rng: random.Random) -> Problem | None:
     # matrix the question actually shows
     A = _permute_rows_only(rng, A)
     nullity = n - r
-    stem = fmt_matrix(A)
-    q = paraphrase("rank_nullspace", stem, rng)
+    stem = f"A = {fmt_matrix(A)}"
+    q = question("rank_nullspace", paraphrase("rank_nullspace", rng, f"{n}x{n}"), stem)
     steps = ["GIVEN: A"]
     rref = A.rref()[0]
     steps.append(f"STEP 1 row reduction gives {fmt_matrix(rref)}, which has "
@@ -920,8 +928,9 @@ def gen_linear_transform(rng: random.Random) -> Problem | None:
     A = _nonsingular(rng, 2, -3, 4)
     v = sp.Matrix(2, 1, lambda i, j: rng.randint(-4, 5))
     img = sp.Matrix(A * v)
-    stem = f"{fmt_matrix(A)} and v = {fmt_matrix(v)}"
-    q = paraphrase("linear_transform", stem, rng)
+    stem = f"A = {fmt_matrix(A)}\n\nv = {fmt_matrix(v)}"
+    q = question("linear_transform",
+                 paraphrase("linear_transform", rng, f"{A.rows}x{A.cols}"), stem)
     steps = ["GIVEN: A, v"]
     steps.append(f"STEP 1 T(v) = A v = {fmt_matrix(img)}")
     unit = sp.Matrix([[0, 0], [1, 0], [1, 1], [0, 1]])
@@ -954,8 +963,8 @@ def gen_matrix_trace(rng: random.Random) -> Problem | None:
     n = rng.choice([2, 3, 3, 4, 4, 5, 5])
     A = _rand_int_matrix(rng, n, None, -4, 5)
     tr = sp.simplify(sp.trace(A))
-    stem = fmt_matrix(A)
-    q = paraphrase("matrix_trace", stem, rng)
+    stem = f"A = {fmt_matrix(A)}"
+    q = question("matrix_trace", paraphrase("matrix_trace", rng, f"{n}x{n}"), stem)
     steps = ["GIVEN: A"]
     steps.append("STEP 1 the trace is the sum of the diagonal entries: "
                  + " + ".join(fmt_scalar(A[i, i]) for i in range(n))
@@ -970,8 +979,8 @@ def gen_matrix_transpose(rng: random.Random) -> Problem | None:
     n = rng.choice([2, 3, 3, 4, 5])
     A = _rand_int_matrix(rng, n, None, -4, 5)
     At = A.T
-    stem = fmt_matrix(A)
-    q = paraphrase("matrix_transpose", stem, rng)
+    stem = f"A = {fmt_matrix(A)}"
+    q = question("matrix_transpose", paraphrase("matrix_transpose", rng, f"{n}x{n}"), stem)
     steps = ["GIVEN: A"]
     steps.append("STEP 1 the transpose exchanges rows and columns, so "
                  f"(A^T)_{{ij}} = A_{{ji}}")
@@ -989,8 +998,8 @@ def gen_matrix_multiply(rng: random.Random) -> Problem | None:
     A = _rand_int_matrix(rng, n, None, -3, 4)
     B = _rand_int_matrix(rng, n, None, -3, 4)
     AB = sp.Matrix(A * B)
-    stem = f"{fmt_matrix(A)} and {fmt_matrix(B)}"
-    q = paraphrase("matrix_multiply", stem, rng)
+    stem = f"A = {fmt_matrix(A)}\n\nB = {fmt_matrix(B)}"
+    q = question("matrix_multiply", paraphrase("matrix_multiply", rng, f"{n}x{n}"), stem)
     steps = ["GIVEN: A, B"]
     steps.append(f"STEP 1 the entry (i, j) of AB is the dot product of row i of A "
                  f"with column j of B")
@@ -1017,8 +1026,8 @@ def gen_matrix_power(rng: random.Random) -> Problem | None:
     # it is kept to the small sizes. LinAlg-Bench only asks for A^2 anyway.
     k = rng.choice([2, 3]) if n <= 3 else 2
     Ak = sp.Matrix(A ** k)
-    stem = fmt_matrix(A)
-    q = paraphrase("matrix_power", stem, rng)
+    stem = f"A = {fmt_matrix(A)}"
+    q = question("matrix_power", paraphrase("matrix_power", rng, f"{n}x{n}"), stem)
     steps = [f"GIVEN: A, k = {k}"]
     A2 = sp.Matrix(A ** 2)
     step_no = 1
@@ -1054,8 +1063,8 @@ def gen_matrix_vector(rng: random.Random) -> Problem | None:
     A = _rand_int_matrix(rng, n, None, -3, 4)
     v = sp.Matrix(n, 1, lambda i, j: rng.randint(-4, 5))
     Av = sp.Matrix(A * v)
-    stem = f"{fmt_matrix(A)} and v = {fmt_matrix(v)}"
-    q = paraphrase("matrix_vector", stem, rng)
+    stem = f"A = {fmt_matrix(A)}\n\nx = {fmt_matrix(v)}"
+    q = question("matrix_vector", paraphrase("matrix_vector", rng, f"{n}x{n}"), stem)
     steps = ["GIVEN: A, v"]
     steps.append("STEP 1 Av is the vector of dot products of the rows of A with v")
     k = 1

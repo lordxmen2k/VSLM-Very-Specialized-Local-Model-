@@ -3,6 +3,7 @@ import random
 import unittest
 
 from la.answer import answers_equal, parse_answer
+from la.benchprompt import PREAMBLE, body_hint
 from la.problems import GENERATORS, generate
 from la.schema import validate_spec
 
@@ -25,7 +26,11 @@ class TestProblems(unittest.TestCase):
                 self.assertTrue(answers_equal(got, truth, mode=p.compare_mode))
                 if p.spec is not None:
                     self.assertEqual(validate_spec(p.spec), [])
-                self.assertTrue(p.prompt().endswith("### Scratchpad\n"))
+                # the prompt is the question, in the benchmark's format:
+                # the preamble, the task, the body, the closing instruction
+                self.assertTrue(p.prompt().startswith(PREAMBLE))
+                self.assertIn("Show all intermediate steps", p.prompt())
+                self.assertIn(body_hint(family), p.prompt())
                 self.assertIn("### Answer", p.completion())
                 self.assertIn("### Plot", p.completion())
 
@@ -49,8 +54,7 @@ class TestProblems(unittest.TestCase):
     def test_augmentation_changes_the_question_but_not_the_answer(self):
         from la.augment import paraphrase
         rng = random.Random(5)
-        stem = r"\begin{pmatrix} 1 & 0 \\ 0 & 1 \end{pmatrix}"
-        questions = {paraphrase("determinant", stem, rng) for _ in range(40)}
+        questions = {paraphrase("determinant", rng, "3x3") for _ in range(40)}
         self.assertGreaterEqual(len(questions), 3,
                                 "the paraphrase templates are not being used")
 

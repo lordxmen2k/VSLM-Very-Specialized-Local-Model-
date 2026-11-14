@@ -531,6 +531,29 @@ def _basis_equal(a: Any, b: Any, tol: float) -> bool:
     return False
 
 
+def strip_boxed(text: str) -> str:
+    """Return the contents of a \\boxed{...}, with the braces balanced.
+
+    A model trained on this corpus answers inside \\boxed{}, because the
+    benchmark asks for it that way. A \\boxed{} around a matrix contains its
+    own braces, so the closing brace cannot be found by counting naively.
+    """
+    marker = "\\boxed{"
+    start = text.find(marker)
+    if start < 0:
+        return text
+    i = start + len(marker)
+    depth = 1
+    while i < len(text) and depth:
+        c = text[i]
+        if c in "{}" and (i == 0 or text[i - 1] != "\\"):
+            depth += 1 if c == "{" else -1
+        i += 1
+    if depth:
+        return text
+    return text[start + len(marker): i - 1]
+
+
 def check_answer(answer_latex: str, truth: Any, tol: float = 1e-9,
                  mode: str = "exact") -> dict:
     """Check a model's answer against a ground truth value.
@@ -538,7 +561,7 @@ def check_answer(answer_latex: str, truth: Any, tol: float = 1e-9,
     `truth` may be a parsed object or a string to be parsed.
     """
     try:
-        got = parse_answer(answer_latex)
+        got = parse_answer(strip_boxed(answer_latex))
     except Exception as exc:
         return {"correct": False, "reason": f"unparseable: {exc}"}
     if isinstance(truth, str):

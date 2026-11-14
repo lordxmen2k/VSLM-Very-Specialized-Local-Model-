@@ -657,6 +657,12 @@ delta attributable to the fine-tune is printed rather than asserted. That
 comparison is the honest one: it holds the questions, the grader and the
 hardware fixed, and changes only the weights.
 
+The prompts are the benchmark's own, not ours. `la/benchprompt.py` reproduces
+the system prompt, the preamble and the per-subcategory task statement. The
+released 4x4 problems carry no task at all - the benchmark's pipeline reads a
+column the released files do not have - so the task is reconstructed from the
+subcategory label, and the report says how many problems that affected.
+
 **What the table says.** The fall from 4×4 to 5×5 is where the models
 separate: the strongest hold up (Gemini-3.1-Pro 94.6 % → 88.0 %, o1
 92.3 % → 81.4 %) while the weaker ones fall off a cliff (Claude-4.5-Sonnet

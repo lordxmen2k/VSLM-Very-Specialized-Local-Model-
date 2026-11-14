@@ -41,7 +41,7 @@ def main(argv=None) -> int:
     ap.add_argument("--data", default="data/test.jsonl")
     ap.add_argument("--limit", type=int, default=0)
     ap.add_argument("--temperature", type=float, default=0.0)
-    ap.add_argument("--max-new-tokens", type=int, default=1024)
+    ap.add_argument("--max-new-tokens", type=int, default=2048)
     ap.add_argument("--batch-size", type=int, default=8)
     ap.add_argument("--out", default="", help="write the per-example results here")
     ap.add_argument("--show", type=int, default=8, help="how many failures to print")

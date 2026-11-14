@@ -636,7 +636,80 @@ singular values, and the condition number built from them — so a model that
 reproduces the same six figures was being marked wrong. An answer that is
 off by one in an integer is still rejected.
 
-## 6. What the benchmark said
+## 6. The benchmark's prompt protocol
+
+The benchmark does not feed a model a bare matrix. Its pipeline
+(`pipeline/inference.py`) sends a system prompt and a user prompt:
+
+    You are a precise mathematical assistant. Show all computation steps clearly.
+    Always put your final numerical answer inside \boxed{}.
+
+    Solve this linear algebra problem. Show your work and give the final answer.
+
+    {task}
+
+    {problem}
+
+The system prompt varies by subcategory — numerical, integer, matrix or vector
+answer. The task statement says what is being computed. The problem is the
+matrix.
+
+**The released CSVs carry the task inside the `problem_latex` column** for
+the 3×3 and 5×5 files, and **not at all** for the 4×4 file, whose questions
+are a bare matrix. The benchmark's own pipeline reads a separate
+`problem_text` column and falls back to a per-subcategory hint when it is
+missing. The released files do not carry that column, so the 4×4 instruction
+has to be reconstructed from the subcategory label.
+
+`la/benchprompt.py` reproduces the protocol: the system prompts and the
+fallback hints are taken from the benchmark's own `SUBCAT_CONFIG`, and the
+task statements are its own wordings with the matrix size filled in. Where the
+released problem carries its own instruction it is used as it stands; where it
+does not, the task is reconstructed and the report says how many problems
+were affected.
+
+### The corpus is written in that format
+
+A model trained on one question format and scored on another is being asked
+to do a task it has never seen phrased, and the score measures that rather
+than the mathematics. The first fine-tuned model scored **35 points below the
+base model** on the benchmark's 3×3 problems while scoring 50 per cent on the
+held-out set, which used our own phrasing.
+
+So the corpus is now written in the benchmark's format, exactly:
+
+    Solve this linear algebra problem. Show your work and give the final answer.
+
+    Find the determinant of the 3x3 matrix A.
+
+    A = \begin{bmatrix} 5 & -3 & 5 \\ 1 & 5 & 3 \\ 5 & 4 & -2 \end{bmatrix}
+
+    Show all intermediate steps. Put your final numerical answer inside \boxed{}.
+
+and the answer is boxed, because that is what the benchmark asks for and what
+its own extractor reads:
+
+    ### Answer
+    \boxed{-266}
+
+### The corpus was truncating itself
+
+The corpus's longest completion is about 1,300 tokens, and the sequence cap
+was 1,024. **3.9 per cent of the corpus was cut short**, and the part that was
+cut is the end of the completion — the plot spec.
+
+That is why the held-out set scored 94 per cent on the plot kind: the model
+had learned to stop before the plot block about one time in twenty-five.
+
+The cap is now 1,536, which clears it with room to spare, and the generation
+budget is 2,048 rather than 1,024 — a model writing a derivation as long as
+the ones it was trained on needs room to finish. The benchmark does the same
+thing, with a token multiplier of two to four depending on the subcategory.
+
+A test now asserts that no corpus example exceeds the cap, so this cannot
+come back.
+
+## 7. What the benchmark said
 
 The trained model was scored on all 660 LinAlg-Bench problems, with the base
 model scored on the same problems for the delta.
@@ -720,7 +793,7 @@ the answer out:
 make explain RESULTS=data/bench_linalg.jsonl
 ```
 
-## 7. Reading the benchmark score
+## 8. Reading the benchmark score
 
 ### The grader is the part that was quietly wrong
 
