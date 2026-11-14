@@ -80,6 +80,8 @@ def extract_last_value(raw: str) -> str:
     for line in reversed([l.strip() for l in (raw or "").splitlines()]):
         if not line or line.startswith("```"):
             continue
+        # the whole line first, then a trailing matrix, then a trailing
+        # number
         candidates = [line, line.rstrip("."), line.split("=")[-1].strip()]
         m = trailing_matrix.search(line)
         if m:
@@ -89,11 +91,19 @@ def extract_last_value(raw: str) -> str:
             candidates.append(m.group(1))
         for candidate in candidates:
             candidate = candidate.strip().strip("$ ")
-            if not candidate:
+            # a candidate with no digit in it is prose, and the answer
+            # grammar will happily read a row of words as a product of
+            # symbols, so the digit has to be there
+            if not candidate or not re.search(r"\d", candidate):
                 continue
             try:
-                parse_answer(candidate)
+                value = parse_answer(candidate)
             except Exception:
+                continue
+            # and it has to be a value, not a product of words that happens
+            # to parse: "So the 2-norm condition number of A is 1.00000"
+            # reads as a product of symbols, which is not an answer
+            if getattr(value, "free_symbols", None):
                 continue
             return candidate
     return ""
