@@ -37,7 +37,7 @@ import urllib.request
 
 from .answer import answers_equal, parse_answer
 from .benchprompt import build_benchmark_prompt, has_task
-from .grading import extract_model_answer, normalise_reference
+from .grading import (extract_boxed, extract_model_answer, normalise_reference)
 from .inference import generate, load_model, parse_completion
 
 # Accuracy on LinAlg-Bench by matrix size, as published in the benchmark's
@@ -116,13 +116,30 @@ def fetch_linalg(cache_dir: str = "bench_cache") -> list[dict]:
 
 
 def score(problems: list[dict], outs: list[str]) -> dict:
-    """Grade against the benchmark's own ground truth, using sympy."""
+    """Grade against the benchmark's own ground truth, using sympy.
+
+    Two scores, because the difference between them is the interesting
+    number.
+
+    `correct` is the benchmark's own protocol: the answer is the last
+    \boxed{} in the response. That is what the published models were scored
+    under, so it is the number that is comparable with the published table.
+
+    `correct_any` is the same comparison against the most recent answer
+    found anywhere in the text - a boxed answer, or the last line that
+    parses. It is not comparable with the published table, and it is not the
+    headline, but the gap between the two says how much of the model's
+    mathematics is being lost to formatting.
+    """
     per_size: dict[str, list[int]] = {}
     per_task: dict[str, list[int]] = {}
+    per_size_any: dict[str, list[int]] = {}
+    per_task_any: dict[str, list[int]] = {}
     unparsed = 0
     records = []
     for p, raw in zip(problems, outs):
-        got = extract_model_answer(raw)
+        boxed = extract_boxed(raw)
+        got = boxed[-1] if boxed else ""
         ok = False
         if got:
             try:
@@ -133,13 +150,28 @@ def score(problems: list[dict], outs: list[str]) -> dict:
                 ok = False
         else:
             unparsed += 1
+        # the lenient reading, for comparison
+        any_got = extract_model_answer(raw)
+        ok_any = ok
+        if not ok_any and any_got:
+            try:
+                ok_any = answers_equal(parse_answer(any_got),
+                                       parse_answer(normalise_reference(p["answer"])),
+                                       tol=BENCH_TOL)
+            except Exception:
+                ok_any = False
         per_size.setdefault(p["size"], []).append(int(ok))
         per_task.setdefault(p.get("task") or "?", []).append(int(ok))
+        per_size_any.setdefault(p["size"], []).append(int(ok_any))
+        per_task_any.setdefault(p.get("task") or "?", []).append(int(ok_any))
         records.append({"size": p["size"], "task": p.get("task"), "id": p.get("id"),
                         "question": p["question"], "reference": p["answer"],
                         "model_answer": got, "correct": bool(ok),
+                        "correct_any": bool(ok_any),
+                        "answer_anywhere": any_got,
                         "raw": raw})
     return {"per_size": per_size, "per_task": per_task, "unparsed": unparsed,
+            "per_size_any": per_size_any, "per_task_any": per_task_any,
             "records": records}
 
 
@@ -171,6 +203,21 @@ def report(res: dict, label: str, problems: list[dict]) -> None:
     for task in sorted(per_task):
         v = per_task[task]
         print(f"    {task:<24}{sum(v):>4}/{len(v):<4} ({100*sum(v)/len(v):5.1f}%)")
+    any_size = res.get("per_size_any") or {}
+    if any_size and any_size != per_size:
+        print()
+        print("  the same answers, read from anywhere in the response:")
+        for size in ("3x3", "4x4", "5x5"):
+            v = any_size.get(size)
+            if not v:
+                continue
+            base = per_size.get(size) or []
+            b = 100 * sum(base) / len(base) if base else 0.0
+            print(f"  {size:<8}{100*sum(v)/len(v):>11.1f}%   "
+                  f"(boxed only: {b:.1f}%)")
+        print("  the gap is formatting, not mathematics: the model knew the")
+        print("  answer and did not put it where the grader could see it.")
+
     print("\n  published comparison — LinAlg-Bench accuracy by matrix size")
     print(f"  {'model':<22}{'3x3':>8}{'4x4':>8}{'5x5':>8}")
     for name, (a, b, c) in PUBLISHED_LINALG.items():
