@@ -547,6 +547,21 @@ shows how each multiplier was found:
   the multiplier for row 2 is (-3)/(-2) = 3/2, so row 2 -= (3/2) * row 1
 ```
 
+### The three runs
+
+| | run 1 | run 2 | run 3 |
+|---|---|---|---|
+| corpus | terse | derivations | derivations, benchmark format |
+| final loss | 0.0661 | 0.0462 | **0.0329** |
+| minutes | 153.4 | 142.7 | 159.7 |
+| tokens per second | 704 | 885 | ~950 |
+| held-out score | 46.0 % | 50.5 % | — |
+| benchmark score | 17.0 % | — | — |
+
+The loss halves across the three runs as the corpus gets closer to something
+a model can actually be taught. Run 3 is the first one whose corpus is
+written in the format it is scored in.
+
 ### The second run
 
 The corpus with the four benchmark-critical families fixed was trained on an
