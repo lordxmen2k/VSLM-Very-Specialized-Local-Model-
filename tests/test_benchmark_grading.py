@@ -73,6 +73,62 @@ class TestBoxedExtraction(unittest.TestCase):
         self.assertEqual(["1", "2"], extract_boxed(raw))
 
 
+class TestTheGradingPathNeedsNoTorch(unittest.TestCase):
+    """la.bench must be importable without the training stack.
+
+    la.grading is documented as "Torch-free on purpose: this is the code
+    that produces the headline number, and it should be testable without a
+    GPU and without a model." la.bench imported la.inference at module level
+    to reach the model, and la.inference imports torch at module level, so
+    the grading path could not be run on a machine without torch - which is
+    exactly where you want to check the grader, before spending a GPU-hour
+    on a score.
+    """
+
+    def test_importing_la_bench_does_not_pull_in_torch(self):
+        import subprocess
+        import sys
+        env = dict(os.environ)
+        env["PYTHONPATH"] = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src")
+        # -S keeps site-packages out of the import path, so a stray torch
+        # cannot satisfy the import and hide the problem.
+        code = (
+            "import sys\n"
+            "sys.modules['torch'] = None\n"
+            "import la.bench\n"
+            "assert la.bench.score and la.bench.fetch_linalg\n"
+            "print('ok')\n"
+        )
+        proc = subprocess.run([sys.executable, "-c", code],
+                              capture_output=True, text=True, env=env)
+        self.assertEqual(0, proc.returncode, proc.stderr)
+        self.assertIn("ok", proc.stdout)
+
+    def test_the_grader_scores_without_torch(self):
+        """The grading path works on a machine that has no torch at all."""
+        import subprocess
+        import sys
+        env = dict(os.environ)
+        env["PYTHONPATH"] = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src")
+        code = (
+            "import sys\n"
+            "sys.modules['torch'] = None\n"
+            "from la.bench import score\n"
+            "problems = [{'size': '3x3', 'question': 'q', 'answer': r'\\det(A) = 7',\n"
+            "             'id': 'x', 'task': 'determinant'}]\n"
+            "outs = ['The final answer is \\\\boxed{7}.']\n"
+            "res = score(problems, outs)\n"
+            "assert res['per_size']['3x3'] == [1], res\n"
+            "print('ok')\n"
+        )
+        proc = subprocess.run([sys.executable, "-c", code],
+                              capture_output=True, text=True, env=env)
+        self.assertEqual(0, proc.returncode, proc.stderr)
+        self.assertIn("ok", proc.stdout)
+
+
 class TestBenchmarkGrading(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

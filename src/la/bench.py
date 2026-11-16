@@ -38,7 +38,20 @@ import urllib.request
 from .answer import answers_equal, parse_answer
 from .benchprompt import build_benchmark_prompt, has_task
 from .grading import (extract_boxed, extract_model_answer, normalise_reference)
-from .inference import generate, load_model, parse_completion
+
+# The model is not needed to grade one. la.inference imports torch at module
+# level, so importing it here would make the grading path - the code that
+# produces the headline number - impossible to run on a machine without the
+# training stack. The model is loaded inside main() instead, where it is
+# actually needed.
+def _load_model(base: str, adapter: str | None):
+    from .inference import load_model
+    return load_model(base, adapter)
+
+
+def _generate(tok, model, prompts: list[str], **kwargs) -> list[str]:
+    from .inference import generate
+    return generate(tok, model, prompts, **kwargs)
 
 # Accuracy on LinAlg-Bench by matrix size, as published in the benchmark's
 # own results (mst-ai/linalg-bench-llm, results/accuracy/). These are the
@@ -288,12 +301,12 @@ def main(argv=None) -> int:
         print(f"{len(problems)} internal held-out problems")
 
     adapter = args.adapter if os.path.isdir(args.adapter) else None
-    tok, model = load_model(args.base, adapter)
+    tok, model = _load_model(args.base, adapter)
     t0 = time.time()
-    outs = generate(tok, model, [p["prompt"] for p in problems],
-                    max_new_tokens=args.max_new_tokens,
-                    temperature=args.temperature, batch_size=args.batch_size,
-                    label="benchmark")
+    outs = _generate(tok, model, [p["prompt"] for p in problems],
+                     max_new_tokens=args.max_new_tokens,
+                     temperature=args.temperature, batch_size=args.batch_size,
+                     label="benchmark")
     print(f"generation took {(time.time()-t0)/60:.1f} min")
     res = score(problems, outs)
     report(res, f"fine-tuned model — {args.benchmark}", problems)
@@ -306,12 +319,12 @@ def main(argv=None) -> int:
             del model
         import torch
         torch.cuda.empty_cache()
-        tok2, base_model = load_model(args.base, None)
+        tok2, base_model = _load_model(args.base, None)
         t0 = time.time()
-        base_outs = generate(tok2, base_model, [p["prompt"] for p in problems],
-                             max_new_tokens=args.max_new_tokens,
-                             temperature=args.temperature, batch_size=args.batch_size,
-                             label="base model")
+        base_outs = _generate(tok2, base_model, [p["prompt"] for p in problems],
+                              max_new_tokens=args.max_new_tokens,
+                              temperature=args.temperature, batch_size=args.batch_size,
+                              label="base model")
         print(f"generation took {(time.time()-t0)/60:.1f} min")
         bres = score(problems, base_outs)
         report(bres, "base model, no adapter", problems)
