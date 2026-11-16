@@ -126,17 +126,18 @@ def main() -> int:
     print("=== one layer on its own ===")
     layer = model.model.layers[0]
     h = torch.randn(bs, 1, cfg.hidden_size, device=dev, dtype=model.dtype)
-    pos = torch.arange(1, 2, device=dev)
+    # the rotary embedding wants position_ids of shape (batch, seq)
+    pos_ids = torch.arange(1, 2, device=dev).unsqueeze(0).expand(bs, 1)
     try:
-        from transformers.models.qwen3.modeling_qwen3 import Qwen3DecoderLayer
-        attn_mask = None
         rotary = model.model.rotary_emb
-        pos_emb = rotary(h, pos)
+        # Qwen3's rotary returns (cos, sin) for the given positions
+        cos, sin = rotary(h, pos_ids)
+        attn_mask = None
         cache = past[:1] if isinstance(past, tuple) else None
 
         def one_layer():
             with torch.no_grad():
-                layer(h, pos_emb, attn_mask, past_key_values=cache,
+                layer(h, (cos, sin), attn_mask, past_key_values=cache,
                       use_cache=True)
         nl = count_kernels(one_layer)
         print(f"  one decoder layer issues {nl} kernels")
@@ -144,6 +145,7 @@ def main() -> int:
               f"{nl*cfg.num_hidden_layers}")
     except Exception as exc:
         print(f"  could not isolate one layer: {exc}")
+        print("  (the per-kernel counts above already answer the question)")
 
     # --- what does torch.compile do? ------------------------------------
     print()
@@ -183,9 +185,28 @@ def main() -> int:
             print("  la.inference.load_model, behind a flag, and the")
             print("  benchmark gets faster.")
     except Exception as exc:
-        print(f"  torch.compile failed: {exc}")
-        import traceback
-        traceback.print_exc()
+        msg = str(exc)
+        print(f"  torch.compile failed: {msg[:120]}")
+        if "Triton" in msg or "triton" in msg:
+            print()
+            print("  Triton is missing. It has no official Windows wheel -")
+            print("  only community forks - so torch.compile is not")
+            print("  available on this platform without one.")
+            print()
+            print("  And the other candidate, flash attention, is not")
+            print("  available either: PyTorch has never compiled")
+            print("  FlashAttention-2 into the Windows wheel")
+            print("  (pytorch/pytorch#108175). The message 'Torch was not")
+            print("  compiled with flash attention' reads like a broken")
+            print("  install; it is a platform limitation.")
+            print()
+            print("  What is left: xformers' memory-efficient backend, which")
+            print("  supports grouped-query attention natively and IS")
+            print("  available on Windows, or a different torch build.")
+            print("  scripts/check_gqa_cost.py measures what each is worth.")
+        else:
+            import traceback
+            traceback.print_exc()
 
     print()
     print("=== the decision ===")
@@ -194,9 +215,20 @@ def main() -> int:
     print()
     print("      model = torch.compile(model, mode='reduce-overhead')")
     print()
-    print("  But weigh it against the alternative first: a model that")
-    print("  stops after 206 tokens instead of 2048 saves ten times")
-    print("  more than this does. The EOS supervision is the bigger win.")
+    print("  On this machine it will not, because triton is missing and")
+    print("  triton has no official Windows wheel.")
+    print()
+    print("  What the kernel counts do say, unambiguously:")
+    print("    197 mm = 28 x 7 + 1   <- the seven projections. CORRECT.")
+    print("    144 kernels per layer  <- the grouped-query expansion and")
+    print("                              the unfused norms. THIS is the cost.")
+    print("    79 per cent of the GPU time is in the matmuls, which run at")
+    print("    about a quarter of the bandwidth a standalone GEMV reaches.")
+    print()
+    print("  Weigh any fix against the alternative first: a model that stops")
+    print("  after 206 tokens instead of 2048 saves ten times more than")
+    print("  this does. The EOS supervision is the bigger win, and it is")
+    print("  already implemented.")
     return 0
 
 

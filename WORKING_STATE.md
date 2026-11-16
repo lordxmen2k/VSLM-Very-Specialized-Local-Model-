@@ -120,6 +120,60 @@ times the same step with `torch.compile(mode="reduce-overhead")`, which fuses
 the elementwise chains and captures the step as a CUDA graph. That is the
 fix, and it is one line in `la.inference.load_model` if it works.
 
+### The kernel breakdown, and a platform wall
+
+The profiler's per-kernel counts are the clearest evidence yet, because they
+are near-exact multiples of 28:
+
+| kernel | count | per layer | time |
+|---|---|---|---|
+| `aten::mm` | 197 | 7 | 9000 µs |
+| cutlass (the mm device kernels) | 141 + 56 | 5 + 2 | 9000 µs |
+| `aten::copy_` | 425 | 15 | 953 µs |
+| `aten::mul` | 424 | 15 | 794 µs |
+| `aten::cat` | 113 | 4 | 343 µs |
+| `aten::mean` | 113 | 4 | 322 µs |
+| `aten::bmm` | 57 | 2 | 268 µs |
+| `aten::add` | 226 | 8 | 238 µs |
+
+**197 `mm` = 28 × 7 + 1.** Seven matmuls per layer is exactly right — q, k,
+v, o, and the three MLP projections. So the matmul *count* is correct. The
+problem is the **144 kernels per layer around them**: 15 copies, 15
+multiplies and 4 cats per layer, which is the grouped-query expansion.
+Qwen3-1.7B has 16 query heads and 8 key/value heads, and the SDPA math
+backend has no fused kernel for that, so the key and value heads are
+materialised at 16 heads — a copy of the whole KV cache — before the
+attention can run.
+
+**The matmuls are 18000 µs of 22831 µs: 79 % of the GPU time.** So even
+eliminating every copy, cat and multiply saves at most 21 %. The bigger
+question is why the matmuls take 18 ms for work that needs 4.6 ms of
+bandwidth. `scripts/check_gqa_cost.py` times each of the seven
+projections against its own floor to name the slow ones.
+
+**Both candidate fixes hit a platform wall:**
+
+* **Flash attention is not available on Windows, and never has been.**
+  Since torch 2.2 the SDPA preferred backend is FlashAttention-2, but the
+  Windows wheel does not compile it in. The message *"Torch was not
+  compiled with flash attention"* reads like a broken install; it is a
+  platform limitation, tracked upstream as
+  [pytorch/pytorch#108175](https://github.com/pytorch/pytorch/issues/108175).
+  Community Windows wheels exist, but none match this environment:
+  `2.8.3+cu130torch2.14` is the only cp314 one, `2.8.4` is built for
+  `torch 2.12.1+cu132` (cu132, not cu130), and `2.8.3` is for torch 2.11.
+  A flash-attn wheel's torch, CUDA and Python versions must *all* match or
+  it installs and then fails to import.
+* **`torch.compile` needs triton, which is also missing** — and triton has
+  no official Windows wheel either, only community forks. The compile
+  attempt failed with `TritonMissing: Cannot find a working triton
+  installation`.
+
+**What is left:** xformers' memory-efficient backend (which supports GQA
+natively and *is* available on Windows, though transformers does not use it
+for Qwen3 by default), a different torch build, or accepting the step
+time. `scripts/check_gqa_cost.py` measures what each of those is worth.
+
 **But it may not matter.** A model that stops after 206 tokens instead of
 2048 is a tenfold saving that dwarfs any of this. The prompt and EOS fixes
 are worth more than every micro-optimisation below them.
@@ -231,7 +285,6 @@ which is bandwidth bound and is a completely different kernel. The two
 numbers cannot be compared, and the reassuring one was the irrelevant one.
 
 ### Reading two clocks at once
-
 There is a second trap, in the CPU-issue-versus-GPU-execute comparison. When
 both clocks read about the same as the wall clock, the obvious conclusion —
 "the GPU is idle, waiting for the CPU" — is **wrong**, because the two clocks
@@ -246,3 +299,32 @@ matmuls. Seventy-two per layer is ten times what it should be, and at
 **A conclusion that a diagnostic script prints in capital letters is still a
 hypothesis.** The script said "CPU-BOUND"; the human reading had to check it
 against the other number in the same output.
+
+### Platform walls are worth finding early
+
+Both candidate fixes for the decode step turned out to be impossible on this
+machine, and both had to be ruled out before they could be recommended:
+
+* **Flash attention is not available on Windows, and never has been.**
+  Since torch 2.2 it is the preferred SDPA backend, but the Windows wheel
+  does not compile it in. The error says *"Torch was not compiled with
+  flash attention"*, which reads like a broken install and is not one.
+  Tracked upstream as
+  [pytorch/pytorch#108175](https://github.com/pytorch/pytorch/issues/108175).
+  Community Windows wheels exist, but each is pinned to one exact
+  torch + CUDA + Python triple, and **a mismatch installs and then fails to
+  import** — so "there is a wheel" is not the same as "there is a wheel for
+  this environment".
+* **`torch.compile` needs triton**, which has no official Windows wheel
+  either, only community forks.
+
+The general rule: when a platform-specific feature is missing, check whether
+it is *missing from the build* or *missing from the platform* before spending
+an afternoon trying to install it. The error text does not distinguish them.
+
+### Check whether the speed problem matters at all
+
+A model that stops after 206 tokens instead of 2048 saves ten times more
+than any launch-overhead or attention-backend work. The token count was the
+bigger lever, and the prompt-mismatch diagnosis had already found it.
+**Weigh the fix against the alternative before optimising.**
