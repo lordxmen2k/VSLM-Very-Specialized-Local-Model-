@@ -25,6 +25,11 @@ import threading
 
 from typing import Any
 
+# The Hugging Face cache has to be pointed at a drive with room before
+# huggingface_hub is imported, because it resolves the path once, at import
+# time. This import must come before transformers.
+from . import hf_cache  # noqa: F401
+
 import torch
 
 from .progress import HEARTBEAT_SECONDS, progress_line

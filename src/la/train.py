@@ -23,6 +23,11 @@ import random
 import sys
 import time
 
+# The Hugging Face cache has to be pointed at a drive with room before
+# huggingface_hub is imported, because it resolves the path once, at import
+# time. This import must come before transformers.
+from . import hf_cache  # noqa: F401
+
 import torch
 from torch.utils.data import Dataset, DataLoader
 

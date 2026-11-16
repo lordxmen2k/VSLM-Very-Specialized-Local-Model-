@@ -25,6 +25,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(
 
 import torch                                     # noqa: E402
 
+from la import hf_cache                          # noqa: E402
 from la.inference import load_model              # noqa: E402
 
 
@@ -52,8 +53,7 @@ def report_cache_space() -> None:
         from huggingface_hub import constants as hf_constants
         cache = hf_constants.HF_HUB_CACHE
     except Exception:
-        cache = os.path.join(os.path.expanduser("~"), ".cache", "huggingface",
-                             "hub")
+        cache = hf_cache.cache_location()
     print(f"  HF_HUB_CACHE : {cache}")
     try:
         # the cache directory may not exist yet, so walk up to the nearest
