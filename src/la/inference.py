@@ -59,6 +59,8 @@ def generate(tok, model, questions: list[str], max_new_tokens: int = 1024,
     outs: list[str] = []
     total = len(questions)
     t0 = time.time()
+    print(f"  {label}: starting, {total} problems, {batch_size} at a time",
+          flush=True)
     for n, i in enumerate(range(0, total, batch_size)):
         chunk = questions[i: i + batch_size]
         prompts = [build_prompt(q) for q in chunk]
@@ -82,7 +84,8 @@ def generate(tok, model, questions: list[str], max_new_tokens: int = 1024,
             rate = done / max(el, 1e-9)
             left = (total - done) / max(rate, 1e-9)
             print(f"  {label}: {done}/{total}  ({rate:.1f}/s, "
-                  f"about {left/60:.0f} min left)", flush=True)
+                  f"about {left/60:.0f} min left, {el/60:.0f} min elapsed)",
+                  flush=True)
     return outs
 
 

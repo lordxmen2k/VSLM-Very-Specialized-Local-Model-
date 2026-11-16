@@ -310,7 +310,8 @@ def main(argv=None) -> int:
         t0 = time.time()
         base_outs = generate(tok2, base_model, [p["prompt"] for p in problems],
                              max_new_tokens=args.max_new_tokens,
-                             temperature=args.temperature, batch_size=args.batch_size)
+                             temperature=args.temperature, batch_size=args.batch_size,
+                             label="base model")
         print(f"generation took {(time.time()-t0)/60:.1f} min")
         bres = score(problems, base_outs)
         report(bres, "base model, no adapter", problems)
