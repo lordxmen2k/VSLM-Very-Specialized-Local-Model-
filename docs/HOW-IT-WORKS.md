@@ -60,6 +60,30 @@ copy of the answer, maintained by hand, to fall out of step with the question.
 The usual failure mode of a hand-built corpus — someone changes the matrix and
 forgets the answer — has no mechanism to occur.
 
+### The answer has to be readable by the grader
+
+sympy being right is not enough. The answer is written as LaTeX, and the
+grader reads LaTeX back in. If the two disagree about what a value looks
+like, the corpus is correct and the score is wrong.
+
+That is not a hypothetical: the answer grammar read a matrix cell as one
+factor, so a cell holding `\frac{1}{10}\sqrt{10}` — two factors — left the
+row one entry short and the matrix came out ragged. Every orthonormalisation
+answer is written that way, and 28 per cent of them scored wrong with the
+model having them exactly right.
+
+The property that settles it, measured over 6,000 generated examples:
+
+| | |
+|---|---|
+| corpus truths the grammar can parse | 6,000 / 6,000 |
+| corpus answers scored wrong when reproduced exactly | 0 / 6,000 |
+
+The second row is the one to watch. A model that writes the answer back
+exactly as the corpus printed it must score correct, in every family. It did
+not, and no test that compared a model's answer with the truth would ever have
+noticed — the answer was right and the check was wrong.
+
 ### Why the derivation is generated rather than written
 
 A human-written derivation for a random matrix is a research project. A
@@ -880,9 +904,15 @@ make explain RESULTS=data/bench_linalg.jsonl
 
 ### The grader is the part that was quietly wrong
 
-Three separate bugs in the grading harness would have made correct answers
-score zero. All three are fixed, and all three are now covered by a test
-that downloads the real benchmark and checks it.
+Six separate bugs in the grading harness would have made correct answers
+score zero. All six are fixed, and all six are now covered by a test that
+downloads the real benchmark and checks it.
+
+The first three were found by reading the harness. The next three were found
+by checking the harness against the benchmark's own 660 answers — the ground
+truth, produced by somebody else — which is a different exercise from
+checking it against answers the harness had produced itself. A check of the
+second kind cannot fail: the answer and the check come from the same place.
 
 **The grammar had no rule for a bare list.** LinAlg-Bench writes the
 eigenvalues as `\lambda = -1, 0, 3`. Strip the label and you have `-1, 0, 3`
@@ -916,15 +946,51 @@ base model answers `\det(A) = 97` inside the box. The reference had its
 label stripped; the model's answer did not, so the answer grammar never saw
 a value. The baseline would have scored zero on every determinant.
 
+**A matrix cell holding a product of factors was read as two entries.** The
+grammar read a cell with `_parse_factor`, which handles one factor. A cell
+holding `\frac{1}{10}\sqrt{10}` is two factors, so the row came out one
+entry short and the matrix was reported as ragged. Every orthonormalisation
+answer in the corpus and the benchmark is written that way, and **28 per cent
+of them scored wrong with the model having them exactly right.**
+
+**The grammar had no `^` token at all.** It knew `\sqrt{}` and nothing else,
+so the prime-power form sympy prints for an irrational with no compact
+radical could not be read back:
+
+```
+(2)^{\frac{71}{348}} * (3)^{\frac{17}{87}} * (5)^{\frac{1}{3}} * (7)^{\frac{245}{348}}
+```
+
+That is the norm of the second Gram-Schmidt vector whenever the vectors are
+sampled at random, and it is genuinely irrational — there is no shorter
+radical to write instead. Those answers were rejected outright.
+
 Both the reference and the model's answer now go through the same
-normalisation, and `\boxed{...}` is extracted with balanced braces.
+normalisation, `\boxed{...}` is extracted with balanced braces, a matrix cell
+is read as a term rather than a single factor, and a power is a power.
 
 The check that matters is the one in
 `tests/test_benchmark_grading.py`: it downloads the 660 problems and
 asserts that every reference answer parses, that a correct answer scores
 correct in all three shapes a model might write it in, and that a wrong
 answer scores wrong. Invented test data would not have caught any of these
-three bugs.
+bugs.
+
+And the check runs **without a GPU**. `la.bench` imported torch at module
+level, so the code that produces the headline number could not be exercised
+on a machine without the training stack — it could only be checked on the one
+machine that happened to have the card. The model is now loaded where it is
+needed, and a test asserts that importing `la.bench` does not pull in torch.
+
+What the grader now says, measured against the real 660 problems:
+
+| | |
+|---|---|
+| reference answers that parse | 660 / 660 |
+| a model that answers correctly, scored correct | 660 / 660 |
+| a wrong answer scored wrong | 330 / 330 integer answers |
+| corpus truths that parse | 6,000 / 6,000 |
+| corpus answers scored wrong when reproduced exactly | 0 / 6,000 |
 
 ### The numbers it produces
 
@@ -960,6 +1026,80 @@ Two things to watch for:
 Every one of these was invisible to the test that existed at the time. They
 are written down because the pattern is the point: **the obvious test does
 not catch the interesting bug.**
+
+### The correct answer the grader threw away
+
+The answer grammar read a matrix cell with `_parse_factor`, which handles one
+factor at a time. A cell holding `\frac{1}{10}\sqrt{10}` is two factors, so
+the row came out one entry short and the matrix was reported as ragged.
+
+Every orthonormalisation answer in the corpus is written that way — the
+Gram-Schmidt vectors come out as scaled radicals — and so are the benchmark's.
+The measured effect over 6,000 generated examples:
+
+| | before | after |
+|---|---|---|
+| corpus truths the grammar could not parse | 33 in 2,000 | **0 in 6,000** |
+| `orthonormal_basis` answers scored wrong when the model had them exactly right | **28.2 %** | **0 %** |
+
+The second row is the one that matters. The grader rejected a *correct* answer
+because of how it was written, and no test comparing a model's answer with the
+truth would have noticed: the answer was right and the check was wrong.
+
+A cell may hold a product of factors, and it is one entry. The parser now
+reads it as a term.
+
+### The power the grammar had never heard of
+
+The grammar had no `^` token at all. It knew `\sqrt{}` and nothing else, so a
+value written the way sympy prints an irrational with no compact radical form
+could not be read back:
+
+```
+(2)^{\frac{71}{348}} * (3)^{\frac{17}{87}} * (5)^{\frac{1}{3}} * (7)^{\frac{245}{348}}
+```
+
+That is the norm of the second Gram-Schmidt vector whenever the vectors are
+sampled at random, and it is genuinely irrational — there is no shorter radical
+to write instead. Those answers were rejected outright, and they are a
+different failure from the one above: that one miscounted the entries, this
+one could not tokenise the answer at all.
+
+The grammar now reads a parenthesised base with an exponent, and a bare base
+with an exponent, in a scalar or in a matrix cell.
+
+### The grader you could not check without a GPU
+
+`la/grading.py` says, in its own docstring:
+
+> Torch-free on purpose. This is the code that produces the headline number,
+> and it should be testable without a GPU and without a model.
+
+`la.bench` imported `la.inference` at module level to reach the model, and
+`la.inference` imports torch at module level — so the grading path could not
+be run on a machine without the training stack. The model is now loaded where
+it is needed.
+
+This is worth stating plainly: the number the whole project is judged on was
+produced by code that could not be exercised without a 12 GB graphics card and
+a several-hour install. The grader could be trusted because it had been
+checked once, on the machine that happened to have the GPU. It now runs
+anywhere, and a test asserts that importing `la.bench` does not pull in torch.
+
+### The explanation that showed nothing
+
+`make explain RESULTS=data/bench_linalg.jsonl` is the documented way to
+settle what the model actually wrote on the benchmark. The held-out set writes
+the truth under `answer`; the benchmark writes it under `reference`. The
+explainer read only the first, so every benchmark failure printed
+
+```
+  A:
+```
+
+— a blank line where the correct answer should be. The tool whose entire
+purpose is to tell a wrong derivation from a missing one was showing neither.
+It now reads both.
 
 ### The derivation that did not add up
 

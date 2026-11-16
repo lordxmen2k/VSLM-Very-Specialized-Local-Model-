@@ -674,17 +674,31 @@ See [the model card](MODEL_CARD.md) for what happened and what it cost.
 > [docs/HOW-IT-WORKS.md](docs/HOW-IT-WORKS.md#what-the-benchmark-said).
 
 
-> **The grader was wrong before the model was.** Three separate bugs in the
-> grading harness would have made correct answers score zero: the answer
-> grammar had no rule for a bare comma-separated list, so all ninety
-> eigenvalue problems failed to parse; the benchmark rounds its eigenvalues to
-> four decimal places and the comparison used a tolerance of 1e-9; and
-> `\boxed{...}` was extracted with a non-greedy regex that stopped at the
-> brace inside `\begin{bmatrix}`, truncating 420 of the 660 answers. All
-> three are fixed, and `tests/test_benchmark_grading.py` now downloads the
-> real benchmark and checks that every reference parses, that a correct
-> answer scores correct, and that a wrong answer scores wrong. See
-> [docs/HOW-IT-WORKS.md](docs/HOW-IT-WORKS.md).
+> **The grader was wrong before the model was.** Six separate bugs in the
+> grading harness would have made correct answers score zero. The first three:
+> the answer grammar had no rule for a bare comma-separated list, so all
+> ninety eigenvalue problems failed to parse; the benchmark rounds its
+> eigenvalues to four decimal places and the comparison used a tolerance of
+> 1e-9; and `\boxed{...}` was extracted with a non-greedy regex that stopped at
+> the brace inside `\begin{bmatrix}`, truncating 420 of the 660 answers.
+>
+> The next two were found later, by checking the grader against the real
+> benchmark rather than against answers it had produced itself. A matrix cell
+> holding a product of factors — `\frac{1}{10}\sqrt{10}` — was read as two
+> entries instead of one, so the row came out short and the matrix was
+> reported as ragged: **28 % of the orthonormalisation answers scored wrong
+> with the model having them exactly right.** And the grammar had no `^` token
+> at all, so the prime-power form sympy prints for an irrational with no
+> compact radical could not be read back at all.
+>
+> The sixth was that `la.bench` imported torch at module level, so the code
+> that produces the headline number could not be run without a 12 GB graphics
+> card. It can now, and a test asserts it.
+>
+> All six are fixed, and `tests/test_benchmark_grading.py` downloads the real
+> benchmark and checks that every reference parses, that a correct answer
+> scores correct, and that a wrong answer scores wrong. See
+> [docs/HOW-IT-WORKS.md](docs/HOW-IT-WORKS.md#bugs-this-project-found).
 
 
 ```bash
@@ -924,13 +938,21 @@ python -m unittest discover -s tests -v
 ```
 
 They are written on `unittest`, so they run with the standard library alone;
-`pytest` runs them unchanged if it happens to be installed. 37 tests, about
-25 seconds.
+`pytest` runs them unchanged if it happens to be installed. 86 tests, about
+27 seconds.
 
 They cover the parts that can silently rot: the answer grammar round trip
 (print, parse, compare), the plot-spec validator, the renderer on every one
 of the ten figure kinds, the problem generators, the augmentation, the
-arithmetic of every printed derivation, and the training configuration.
+arithmetic of every printed derivation, the training configuration, and the
+benchmark grader — against the real 660 benchmark problems, not a mock of
+them.
+
+**A test that checks the grader against the real data is the one that finds
+the bugs.** The three bugs in the grading harness were all invisible to a test
+that compared a model's answer with a truth the grader had produced itself:
+the answer was right and the check was wrong. See
+[docs/HOW-IT-WORKS.md](docs/HOW-IT-WORKS.md#bugs-this-project-found).
 
 ---
 

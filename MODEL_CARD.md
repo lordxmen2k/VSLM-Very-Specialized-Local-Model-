@@ -68,6 +68,13 @@ The determinant is taught two ways on purpose: cofactor expansion up to
 at 5x5 because they are locked into cofactor expansion and lose the sign, so
 the algorithm that does not collapse is the one taught.
 
+**Every answer in the corpus can be read back by the grader.** Measured over
+6,000 generated examples: all 6,000 truths parse, and a model that reproduces
+an answer exactly is scored correct in all seventeen families. That property
+is what makes the held-out score mean something — it was not true until the
+grammar was fixed, and while it was false, 28 per cent of the orthonormalisation
+answers were scored wrong with the model having them exactly right.
+
 ## Evaluation
 
 There are two measurements and they are not the same thing.
@@ -89,6 +96,15 @@ in the project that does not depend on the training data.
 
 The base model scores 29.5 per cent on it. The fine-tuned model's score is
 recorded in `docs/HOW-IT-WORKS.md` when the run completes.
+
+**The grader has been checked against the real benchmark, and it is now
+checkable without a GPU.** All 660 reference answers parse, a model that
+answers correctly scores 660/660 in every shape it might write the answer in,
+and a wrong answer scores wrong. Getting there took four bugs in the grading
+harness, three of which would have made correct answers score zero — and one
+of which rejected 28 per cent of the orthonormalisation answers even when the
+model had them exactly right. The account is in
+[docs/HOW-IT-WORKS.md](docs/HOW-IT-WORKS.md#bugs-this-project-found).
 
 ### Why the first fine-tune scored below the base model
 
@@ -112,7 +128,10 @@ way it was trained.
   step without necessarily performing it.
 - Formatting is load-bearing. A model that answers correctly in a
   different format scores zero. The grading is deliberately lenient about
-  the last boxed answer and strict about the arithmetic.
+  the last boxed answer and strict about the arithmetic — but a format the
+  grammar cannot read at all still scores zero, and that has happened twice
+  in this project's history. Both times the answer was right and the check
+  was wrong.
 - 4x4 and 5x5 determinants are the weakest area, and they are the area the
   benchmark weights most heavily.
 
