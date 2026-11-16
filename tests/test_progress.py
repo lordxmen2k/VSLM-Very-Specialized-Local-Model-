@@ -33,6 +33,10 @@ class TestProgressLine(unittest.TestCase):
         line = progress_line("x", 0, 660, 0.0)
         self.assertIn("0/660", line)
 
+    def test_it_does_not_claim_a_time_left_before_it_has_measured_one(self):
+        line = progress_line("x", 0, 660, 60.0)
+        self.assertIn("about ? min left", line)
+
     def test_the_count_only_ever_grows(self):
         seen = [progress_line("x", d, 660, 60.0 * (d + 1))
                 for d in range(0, 660, 40)]
