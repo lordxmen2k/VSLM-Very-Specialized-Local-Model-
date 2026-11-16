@@ -292,7 +292,8 @@ def main(argv=None) -> int:
     t0 = time.time()
     outs = generate(tok, model, [p["prompt"] for p in problems],
                     max_new_tokens=args.max_new_tokens,
-                    temperature=args.temperature, batch_size=args.batch_size)
+                    temperature=args.temperature, batch_size=args.batch_size,
+                    label="benchmark")
     print(f"generation took {(time.time()-t0)/60:.1f} min")
     res = score(problems, outs)
     report(res, f"fine-tuned model — {args.benchmark}", problems)

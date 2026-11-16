@@ -149,3 +149,25 @@ class TestBenchmarkPromptFormat(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+    def test_the_derivation_states_the_answer_in_the_answer_format(self):
+        """The model reconstructs the answer from the derivation rather than
+        copying it, and for a labelled pair it loses the labels: "1, 2"
+        instead of "rank = 1, nullity = 2". The grader compares a list with
+        a dict and calls it wrong.
+
+        The derivation now ends by stating the answer in the same form as
+        the answer field, so the model has something to copy.
+        """
+        import random
+        rng = random.Random(37)
+        for family in ("rank_nullspace", "projection", "lu_factor",
+                       "determinant", "eigenvalues"):
+            p = None
+            for _ in range(40):
+                p = GENERATORS[family](rng)
+                if p is not None:
+                    break
+            self.assertTrue(p.scratchpad.rstrip().endswith(
+                f"the answer is {p.answer}"),
+                f"{family} does not state its answer in the answer format")

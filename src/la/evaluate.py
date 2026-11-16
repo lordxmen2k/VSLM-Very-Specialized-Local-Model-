@@ -70,7 +70,8 @@ def main(argv=None) -> int:
         prompts = [r["question"] for r in rows]
     outs = generate(tok, model, prompts,
                     max_new_tokens=args.max_new_tokens,
-                    temperature=args.temperature, batch_size=args.batch_size)
+                    temperature=args.temperature, batch_size=args.batch_size,
+                    label="held-out set")
     print(f"generation took {(time.time()-t0)/60:.1f} min")
 
     n = len(rows)

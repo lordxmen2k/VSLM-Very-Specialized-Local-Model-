@@ -51,6 +51,18 @@ class Problem:
     compare_mode: str = "exact"   # "exact" | "basis" | "diag"
     stem: str = ""                # the core statement, before paraphrasing
 
+    def __post_init__(self):
+        # The model tends to state the answer in its own words at the end of
+        # the derivation, and for the families whose answer is a labelled
+        # pair it loses the labels: "1, 2" instead of "rank = 1, nullity =
+        # 2". The grader then compares a list with a dict and calls it
+        # wrong. Stating the answer in the derivation, in the same form as
+        # the answer field, is what makes the model copy it rather than
+        # reconstruct it.
+        if self.answer and self.scratchpad:
+            self.scratchpad = (f"{self.scratchpad.rstrip()}\n"
+                               f"the answer is {self.answer}")
+
     def to_json(self) -> dict:
         d = asdict(self)
         d["tags"] = list(self.tags)
