@@ -51,6 +51,31 @@ class TestProblems(unittest.TestCase):
         b = [generate(f, random.Random(7)).question for f in sorted(GENERATORS)]
         self.assertEqual(a, b)
 
+    def test_every_generated_answer_can_be_read_back_by_the_grader(self):
+        """A model that writes an answer back exactly as the corpus printed it
+        must score correct.
+
+        One problem per family is not enough to find this. The grammar read a
+        matrix cell as a single factor, so a cell holding
+        \\frac{1}{10}\\sqrt{10} left the row one entry short and the matrix
+        came out ragged - and that shape turns up in about a quarter of the
+        orthonormalisation answers and almost none of the others. The test
+        above, sampling one instance per family, passed throughout.
+        """
+        checked = 0
+        for family in sorted(GENERATORS):
+            rng = random.Random(2024)
+            for _ in range(40):
+                p = generate(family, rng)
+                if p is None:
+                    continue
+                checked += 1
+                with self.subTest(family=family, answer=p.answer[:80]):
+                    got = parse_answer(p.answer)
+                    truth = parse_answer(p.truth)
+                    self.assertTrue(answers_equal(got, truth, mode=p.compare_mode))
+        self.assertGreater(checked, 400)
+
     def test_augmentation_changes_the_question_but_not_the_answer(self):
         from la.augment import paraphrase
         rng = random.Random(5)
