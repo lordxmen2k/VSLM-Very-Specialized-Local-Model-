@@ -105,7 +105,13 @@ def main(argv=None) -> int:
             if len((r.get("raw") or "").splitlines()) > args.lines:
                 print("    ...")
             print()
-            print("  A:", (r.get("answer") or "")[:160].replace("\n", " "))
+            # The held-out set writes the truth under "answer"; the benchmark
+            # writes it under "reference". Reading only one of them means the
+            # other file prints a blank line where the correct answer should
+            # be, and this is the tool you read to tell a wrong derivation
+            # from a missing one.
+            truth = r.get("answer") or r.get("reference") or ""
+            print("  A:", truth[:160].replace("\n", " "))
     if not shown and args.family:
         print(f"\nno failures in {args.family}")
     return 0

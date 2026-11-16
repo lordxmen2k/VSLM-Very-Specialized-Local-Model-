@@ -75,3 +75,30 @@ class TestExplainOnBenchmarkRecords(unittest.TestCase):
             self.assertEqual(0, proc.returncode, proc.stderr)
             self.assertIn("determinant", proc.stdout)
             self.assertIn("3x3", proc.stdout)
+            # The benchmark writes the correct answer under "reference" and
+            # the held-out set under "answer". The explainer is the tool you
+            # read to tell a wrong derivation from a missing one, so it has to
+            # print the truth for both shapes - a blank line here hides the
+            # answer on every benchmark failure.
+            self.assertIn("A: 4", proc.stdout)
+
+    def test_it_shows_the_held_out_set_answer_too(self):
+        import json
+        import os
+        import subprocess
+        import sys
+        import tempfile
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "results.jsonl")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(json.dumps({
+                    "family": "determinant", "question": "q", "answer": "-41",
+                    "correct": False,
+                    "raw": "### Scratchpad\nSTEP 1 x\n### Answer\n0"}) + "\n")
+            env = dict(os.environ)
+            env["PYTHONPATH"] = os.path.join(root, "src")
+            proc = subprocess.run([sys.executable, "-m", "la.explain", path],
+                                  capture_output=True, text=True, env=env, cwd=root)
+            self.assertEqual(0, proc.returncode, proc.stderr)
+            self.assertIn("A: -41", proc.stdout)
