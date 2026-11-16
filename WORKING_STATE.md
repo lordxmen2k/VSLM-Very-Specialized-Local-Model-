@@ -70,6 +70,39 @@ forward pass without the generation machinery, and the LM head on its own.
 kernel launch overhead — not per token, not bandwidth.** That is the
 measurement that decides it.
 
+### What the decode profile showed
+
+| measurement | value | what it means |
+|---|---|---|
+| 8×2048 @ 2048×2048 GEMV | **0.016 ms, 521 GB/s** | the hardware is fast and healthy |
+| step time, batch 1 → 16 | 286 → 326 ms for 8 tokens | **16× the work, 1.14× the time** |
+| decode forward, batch 8 | 32.7 ms | vs a 4.6 ms bandwidth floor — **7.2×** |
+| LM head alone | 1.38 ms (4 %) | not it |
+| per layer | 1.17 ms | vs a 0.16 ms floor |
+
+**The cost is per step, not per token.** Batch 1 and batch 16 cost the same.
+That rules out bandwidth and arithmetic, both of which scale with the work.
+Attention was already ruled out at 0.64 ms.
+
+What is left is **per-step overhead**: the GPU is idle for most of the step,
+waiting for the CPU to launch the kernels. A Qwen3 layer is around thirty
+launches; twenty-eight layers is around eight hundred and forty, and at
+twenty to thirty microseconds each that is the right magnitude for the
+missing ~27 ms. It also explains the symptom the user saw at the very
+beginning — **the GPU sitting at 4 % utilisation** while the run appeared to
+hang. That was never a slow GPU; the GPU was waiting.
+
+`scripts/check_cpu_bound.py` measures the two clocks separately — the CPU
+time to *issue* the step against the GPU time to *execute* it — and counts
+the kernel launches with the profiler. If the CPU time is most of the wall
+clock, the step is CPU-bound and the fix is fewer launches
+(`torch.compile(mode="reduce-overhead")`, or CUDA graphs), not a faster GPU,
+not a different attention backend, and not a different CUDA build.
+
+**But this may not matter.** A model that stops after 206 tokens instead of
+2048 is a tenfold saving that dwarfs any of this. The prompt and EOS fixes
+are worth more than every micro-optimisation below them.
+
 ### The cache
 
 The Hugging Face cache defaults to `%USERPROFILE%\.cache\huggingface`, which
