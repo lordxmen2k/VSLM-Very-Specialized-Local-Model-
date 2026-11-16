@@ -15,14 +15,21 @@ around thirty kernel launches; twenty-eight layers is around eight hundred
 and forty, and at twenty to thirty microseconds of launch overhead each that
 is the right magnitude for the missing time.
 
-This measures the two clocks separately:
+    This measures the two clocks separately:
 
   * the CPU time to *issue* the step, which is the queueing cost
   * the GPU time to *execute* the step, which is the work
 
-If the CPU time is close to the wall time and the GPU time is small, the
-step is CPU-bound, and the fix is fewer launches or CUDA graphs - not a
-faster GPU, not a different attention backend, and not a different build.
+The first run of this script printed "CPU-BOUND" and the GPU was busy for
+the same time as the CPU. That was read as "the GPU is waiting for the
+CPU", which is wrong: the two clocks run concurrently, so both being 31 ms
+means the CPU is spending 31 ms issuing and the GPU is spending 31 ms
+executing, and neither is the bottleneck alone.
+
+What the two clocks together do show is that the step issues about two
+thousand kernels. At the 5 to 30 microseconds a CUDA launch costs, that
+count is the step's cost. The GPU is not idle; it is busy running two
+thousand tiny kernels, each doing almost nothing.
 
     python scripts/check_cpu_bound.py
 """
@@ -102,7 +109,13 @@ def main() -> int:
               f"({100*cpu/wall:5.1f} per cent of the wall clock)")
         print(f"    GPU to execute    : {gpu:6.2f} ms "
               f"({100*gpu/wall:5.1f} per cent of the wall clock)")
-        if cpu > 0.8 * wall:
+        if abs(cpu - gpu) < 0.15 * wall:
+            print("    => the two clocks agree. The CPU is issuing and the")
+            print("       GPU is executing concurrently, and the step is")
+            print("       made of a very large number of tiny kernels.")
+            print("       Neither clock alone is the bottleneck; the kernel")
+            print("       count is. See scripts/check_kernel_count.py.")
+        elif cpu > 0.8 * wall:
             print("    => CPU-BOUND. The GPU is waiting for the CPU to")
             print("       queue kernels. The step is launch overhead.")
         elif gpu > 0.8 * wall:
@@ -148,6 +161,19 @@ def main() -> int:
         print(f"  time per launch             : {32700/n_launch:.1f} us")
     print("  a typical CUDA launch costs 5 to 30 us of CPU time")
     print()
+    print(f"  per layer                   : "
+          f"{n_launch/model.config.num_hidden_layers:.0f} kernels")
+    print("  a Qwen3 decoder layer needs about 7 matmuls plus a few")
+    print("  norms. Seventy-two per layer is about ten times that, and")
+    print("  it is why the step costs what it does.")
+    print("  The GPU is not idle - it is running two thousand tiny")
+    print("  kernels, each doing almost nothing.")
+    print()
+    print("  The fix is fewer kernels: torch.compile with")
+    print("  mode='reduce-overhead' fuses the elementwise chains and")
+    print("  captures the step as a CUDA graph.")
+    print("  Run scripts/check_kernel_count.py to measure that.")
+    print()
 
     # --- the fix, if it is launch overhead ------------------------------
     print("=== can CUDA graphs remove the launch overhead? ===")
@@ -160,22 +186,31 @@ def main() -> int:
     print("  graphs are what reduce-overhead uses.")
 
     print()
-    print("=== a third possibility worth measuring: the CPU is slow ===")
+    print("=== how much of this is the CPU's fault? ===")
     print(f"  torch.get_num_threads() = {torch.get_num_threads()}")
     print("  a decode step is mostly small kernel launches, and each one")
     print("  has to be prepared on the CPU. A slow CPU - an old chip, a")
     print("  thermally throttled laptop, or antivirus scanning every")
-    print("  launch - shows up exactly like this.")
+    print("  launch - makes every launch more expensive.")
     print()
-    print("  the machine matters: a desktop-class CPU launches kernels")
-    print("  about five times faster than a laptop one.")
+    print("  16.3 us per launch is slow for a desktop CPU, which is")
+    print("  usually 5 to 8 us. A laptop-class chip or an antivirus")
+    print("  scanner on every launch would explain the difference.")
+    print("  This is worth checking, but it only scales the cost of the")
+    print("  same two thousand kernels - it does not remove them.")
 
     print()
     print("=== the verdict ===")
-    print("  if the CPU issue time is most of the wall clock, the step is")
-    print("  CPU-bound and the answers are, in order of effort:")
-    print("    1. torch.compile(mode='reduce-overhead') on the model")
-    print("    2. a faster CPU")
+    print("  The step issues about two thousand kernels and that is the")
+    print("  cost. The GPU is busy, the CPU is busy, and neither is the")
+    print("  bottleneck on its own: they are both busy with the same")
+    print("  two thousand tiny kernels.")
+    print()
+    print("  The answers, in order of effort:")
+    print("    1. torch.compile(mode='reduce-overhead') - fuses the")
+    print("       elementwise chains and captures a CUDA graph. This is")
+    print("       the fix. Measure it with check_kernel_count.py.")
+    print("    2. a faster CPU - makes each launch cheaper, same count")
     print("    3. accepting it - and checking whether it matters at all,")
     print("       because the model stopping after 206 tokens instead of")
     print("       2048 is a tenfold saving that dwarfs any of this")

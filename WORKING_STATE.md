@@ -84,22 +84,43 @@ measurement that decides it.
 That rules out bandwidth and arithmetic, both of which scale with the work.
 Attention was already ruled out at 0.64 ms.
 
-What is left is **per-step overhead**: the GPU is idle for most of the step,
-waiting for the CPU to launch the kernels. A Qwen3 layer is around thirty
-launches; twenty-eight layers is around eight hundred and forty, and at
-twenty to thirty microseconds each that is the right magnitude for the
-missing ~27 ms. It also explains the symptom the user saw at the very
-beginning — **the GPU sitting at 4 % utilisation** while the run appeared to
-hang. That was never a slow GPU; the GPU was waiting.
+### What the clock comparison showed — and how to read it
 
-`scripts/check_cpu_bound.py` measures the two clocks separately — the CPU
-time to *issue* the step against the GPU time to *execute* it — and counts
-the kernel launches with the profiler. If the CPU time is most of the wall
-clock, the step is CPU-bound and the fix is fewer launches
-(`torch.compile(mode="reduce-overhead")`, or CUDA graphs), not a faster GPU,
-not a different attention backend, and not a different CUDA build.
+| | batch 1 | batch 8 |
+|---|---|---|
+| wall clock | 31.86 ms | 32.64 ms |
+| CPU to issue | 31.05 ms (97.5 %) | 32.82 ms (100.5 %) |
+| GPU to execute | 30.98 ms (97.2 %) | 32.37 ms (99.2 %) |
+| kernel launches per step | **2009** | **2009** |
 
-**But this may not matter.** A model that stops after 206 tokens instead of
+**The first reading of this was wrong, and the correction matters.** The
+script printed "CPU-BOUND", and "the GPU is waiting for the CPU" was the
+obvious conclusion. It is not what the numbers say. The two clocks run
+**concurrently**, so both being 31 ms means the CPU spends 31 ms issuing
+*and* the GPU spends 31 ms executing. If the CPU were merely queueing while
+the GPU idled, the GPU figure would be the 4.6 ms bandwidth floor.
+
+The GPU is **not** idle. It is busy running **two thousand kernels** — about
+**72 per layer** for a 28-layer model, where a Qwen3 decoder layer needs
+roughly seven matmuls plus a couple of norms. Seventy-two is about ten
+times that. At 16.3 µs per launch, two thousand launches *is* the 32.7 ms.
+
+Two candidate causes, both plausible:
+
+* **grouped-query attention.** Qwen3-1.7B has 16 query heads and 8
+  key/value heads, so the query is broadcast across the groups. The SDPA
+  math backend has no fused kernel for that and materialises the
+  broadcast.
+* **no fusion at all.** RMSNorm, the rotary embedding, the activation and
+  the residual adds are each several separate kernels without
+  `torch.compile`.
+
+`scripts/check_kernel_count.py` attributes the expansion by module and then
+times the same step with `torch.compile(mode="reduce-overhead")`, which fuses
+the elementwise chains and captures the step as a CUDA graph. That is the
+fix, and it is one line in `la.inference.load_model` if it works.
+
+**But it may not matter.** A model that stops after 206 tokens instead of
 2048 is a tenfold saving that dwarfs any of this. The prompt and EOS fixes
 are worth more than every micro-optimisation below them.
 
@@ -208,3 +229,20 @@ timed a **4096-cube matmul**, which is compute bound and reaches 68 TFLOP/s.
 A decode step is a **GEMV** — eight rows against the full weight matrix —
 which is bandwidth bound and is a completely different kernel. The two
 numbers cannot be compared, and the reassuring one was the irrelevant one.
+
+### Reading two clocks at once
+
+There is a second trap, in the CPU-issue-versus-GPU-execute comparison. When
+both clocks read about the same as the wall clock, the obvious conclusion —
+"the GPU is idle, waiting for the CPU" — is **wrong**, because the two clocks
+run *concurrently*. CPU issue 31 ms and GPU execute 31 ms means both are
+busy with the same work, not that one is waiting for the other.
+
+The clue that settles it is the kernel count: **2009 launches for a 28-layer
+model, about 72 per layer**, where a Qwen3 decoder layer needs roughly seven
+matmuls. Seventy-two per layer is ten times what it should be, and at
+16.3 µs per launch that count *is* the 32.7 ms step.
+
+**A conclusion that a diagnostic script prints in capital letters is still a
+hypothesis.** The script said "CPU-BOUND"; the human reading had to check it
+against the other number in the same output.
