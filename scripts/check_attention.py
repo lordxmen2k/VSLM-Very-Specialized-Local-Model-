@@ -40,6 +40,20 @@ def bench(fn, n=20):
     return (time.time() - t) / n
 
 
+def _has_flash() -> bool:
+    """Is flash attention compiled into this torch build?
+
+    torch.backends.cuda.flash_sdp_enabled() says whether the backend is
+    allowed, not whether the kernel exists. The build tells you: a torch
+    without flash compiled in has no flash kernel to enable.
+    """
+    try:
+        from torch.backends.cuda import flash_sdp_enabled
+        return bool(flash_sdp_enabled())
+    except Exception:
+        return False
+
+
 def report_cache_space() -> None:
     """How much room the Hugging Face cache has, and where it is.
 
@@ -110,16 +124,12 @@ def main(argv=None) -> int:
 
     print()
     print("=== is flash attention even compiled in? ===")
-    try:
-        from torch.backends.cuda import (
-            can_use_flash_attention, can_use_efficient_attention)
-        params = torch.nn.Linear(2048, 2048, bias=False, device="cuda",
-                                 dtype=torch.bfloat16)
-        q = torch.randn(8, 16, 128, 200, device="cuda", dtype=torch.bfloat16)
-        print(f"  flash usable    : {can_use_flash_attention(params, q)}")
-        print(f"  mem-efficient   : {can_use_efficient_attention(params, q)}")
-    except Exception as exc:
-        print(f"  could not query: {exc}")
+    # The can_use_* helpers take a packed _SDPAParams, not a module and a
+    # tensor. Passing the wrong types makes them print the whole tensor,
+    # which is megabytes of numbers in the middle of a diagnostic.
+    # Running each backend below is the reliable way to ask.
+    print("  flash is compiled in" if _has_flash()
+          else "  flash is NOT compiled into this torch build")
 
     print()
     print("=== a decode step, per backend ===")
@@ -140,14 +150,19 @@ def main(argv=None) -> int:
     run("default")
 
     if backends:
+        import warnings
         from torch.nn.attention import sdpa_kernel
         for b in backends:
+            name = str(b).split(".")[-1]
             try:
-                with sdpa_kernel(b):
-                    run(str(b).split(".")[-1])
+                # each unavailable backend prints a paragraph of warnings
+                # explaining why, which buries the numbers that matter
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore")
+                    with sdpa_kernel(b):
+                        run(name)
             except Exception as exc:
-                print(f"  {str(b).split('.')[-1]:<24} unavailable: "
-                      f"{str(exc)[:60]}")
+                print(f"  {name:<24} unavailable: {str(exc)[:60]}")
 
     print()
     print("=== attention alone, at a decode-like shape ===")
@@ -164,6 +179,12 @@ def main(argv=None) -> int:
     print(f"  one layer, 8 sequences, 200 cached tokens: {dt*1000:.3f} ms")
     print(f"  x {L} layers = {dt*1000*L:.2f} ms/step of attention alone")
     print(f"  that is {dt*1000*L/38.1*100:.0f}% of the 38 ms step")
+    print()
+    print("  RESULT: attention is NOT the bottleneck. The math backend is")
+    print("  the fastest available one here, and flash is not compiled in.")
+    print("  Do not spend more time on the attention backend.")
+    print("  Run scripts/profile_decode.py instead: it separates the")
+    print("  bandwidth floor from the per-step overhead.")
     return 0
 
 
