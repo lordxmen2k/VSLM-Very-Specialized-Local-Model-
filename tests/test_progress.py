@@ -45,6 +45,12 @@ class TestProgressLine(unittest.TestCase):
         line = progress_line("x", 1, 660, 1.0)
         self.assertNotIn("about ? min left", line)
 
+    def test_the_batch_in_flight_is_reported(self):
+        """The problem count only moves when a whole batch finishes, so
+        without the batch number the line looks frozen."""
+        line = progress_line("x", 0, 660, 60.0, batch=4, batches=83)
+        self.assertIn("batch 4/83", line)
+
     def test_the_count_only_ever_grows(self):
         seen = [progress_line("x", d, 660, 60.0 * (d + 1))
                 for d in range(0, 660, 40)]

@@ -71,27 +71,32 @@ def generate(tok, model, questions: list[str], max_new_tokens: int = 1024,
     # look dead. This prints the elapsed time every minute whatever the
     # batch is doing.
     stop = threading.Event()
+    n_batches = (total + batch_size - 1) // batch_size
+    state = {"batch": 1}
 
     def heartbeat() -> None:
         while not stop.wait(HEARTBEAT_SECONDS):
             el = time.time() - t0
             done = len(outs)
-            line = progress_line(label, done, total, el)
+            line = progress_line(label, done, total, el,
+                                 batch=state["batch"], batches=n_batches)
             print(f"{line}  (still working)", flush=True)
 
     thread = threading.Thread(target=heartbeat, daemon=True)
     thread.start()
     try:
         return _run_batches(tok, model, questions, outs, max_new_tokens,
-                            temperature, batch_size, label, total, t0)
+                            temperature, batch_size, label, total, t0, state)
     finally:
         stop.set()
         thread.join(timeout=1.0)
 
 
 def _run_batches(tok, model, questions, outs, max_new_tokens, temperature,
-                 batch_size, label, total, t0):
+                 batch_size, label, total, t0, state):
+    n_batches = (total + batch_size - 1) // batch_size
     for n, i in enumerate(range(0, total, batch_size)):
+        state["batch"] = n + 1
         chunk = questions[i: i + batch_size]
         prompts = [build_prompt(q) for q in chunk]
         enc = tok(prompts, return_tensors="pt", padding=True,
@@ -109,7 +114,8 @@ def _run_batches(tok, model, questions, outs, max_new_tokens, temperature,
             new = gen[j][enc["input_ids"].shape[1]:]
             outs.append(tok.decode(new, skip_special_tokens=True))
         done = min(i + batch_size, total)
-        print(progress_line(label, done, total, time.time() - t0), flush=True)
+        print(progress_line(label, done, total, time.time() - t0,
+                             batch=n + 1, batches=n_batches), flush=True)
     return outs
 
 
