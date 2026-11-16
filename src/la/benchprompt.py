@@ -179,6 +179,80 @@ def model_prompt(question: str) -> str:
     return question
 
 
+# --------------------------------------------------------------- chat ---
+
+# Qwen3's chat template, and the two flags that decide what the model does
+# with it.
+#
+# The model is `Qwen/Qwen3-1.7B`, the instruction-tuned checkpoint. Its
+# natural turn-ender is <|im_end|>, and its weights are trained to emit it
+# after a complete answer. The Base checkpoint has no such signal: it stops
+# only because it recognises the corpus format, and under a prompt it does
+# not recognise it keeps generating until it hits the token cap.
+#
+# `enable_thinking=False` is deliberate. Qwen3 can wrap its answer in a
+# <think> block, but this corpus already teaches explicit reasoning - every
+# derivation is a numbered STEP line ending in a VERIFY check - so a hidden
+# reasoning pass would duplicate it, and Qwen's own documentation warns that
+# greedy decoding in thinking mode "can lead to performance degradation and
+# endless repetitions".
+DEFAULT_THINKING = False
+
+
+def render_chat(tokenizer, system: str, user: str,
+                thinking: bool = DEFAULT_THINKING) -> str:
+    """Render a system-and-user pair through the tokenizer's chat template.
+
+    One definition, used by the corpus builder and by inference, so that
+    what the model is trained on and what it is scored on are the same
+    string. The first project used the Base checkpoint and fed it raw text
+    with no template at all; the benchmark then prepended its own system
+    prompt, and the model was answering a prompt it had never seen. It did
+    not stop, and the first batch of the benchmark did not finish in six
+    minutes.
+    """
+    messages = []
+    if system:
+        messages.append({"role": "system", "content": system})
+    messages.append({"role": "user", "content": user})
+    try:
+        return tokenizer.apply_chat_template(
+            messages, tokenize=False, add_generation_prompt=True,
+            enable_thinking=thinking)
+    except TypeError:
+        # A tokenizer whose template does not take enable_thinking. Qwen3's
+        # does; this keeps the function usable with one that does not.
+        return tokenizer.apply_chat_template(
+            messages, tokenize=False, add_generation_prompt=True)
+
+
+def system_prompt_for(task: str) -> str:
+    """The benchmark's system prompt for a subcategory."""
+    return SYSTEM_PROMPTS.get(
+        task, BASE_SYSTEM + "Always put your final numerical answer inside \\boxed{}.")
+
+
+def row_prompt(row: dict, tokenizer, thinking: bool = DEFAULT_THINKING) -> str:
+    """The rendered prompt for a corpus row.
+
+    One definition, used by the corpus builder, the trainer and the
+    benchmark. The row carries the system turn and the user turn; this
+    renders them through the tokenizer's chat template.
+
+    A row that has no chat turns - one written before the migration - falls
+    back to its `prompt` field, which is the bare question. That keeps the
+    old corpus usable and makes the difference visible: the old rows have
+    no system turn, so the benchmark's system prompt has nothing to match
+    against.
+    """
+    system = row.get("system")
+    user = row.get("user")
+    if system is None and user is None:
+        return row.get("prompt", row.get("question", ""))
+    return render_chat(tokenizer, system or "", user or "",
+                       thinking=thinking)
+
+
 def body_hint(subcat: str) -> str:
     """The closing instruction for a family."""
     return BODY_HINTS.get(normalise_subcat(subcat),
@@ -195,6 +269,23 @@ def build_benchmark_prompt(problem: str, subcat: str,
     bare matrix does not say what is being asked, and the problem would be
     unanswerable.
     """
+    system, user = benchmark_prompt_pair(problem, subcat, size)
+    return f"{system}\n\n{user}"
+
+
+def benchmark_prompt_pair(problem: str, subcat: str,
+                           size: str | None = None) -> tuple[str, str]:
+    """The benchmark's system prompt and user prompt, separately.
+
+    The system prompt is the benchmark's own, verbatim, per subcategory. The
+    user prompt is the preamble, the task and the body.
+
+    The model is given these through the tokenizer's chat template, so the
+    two arrive as the system and user turns the model was instruction-tuned
+    to expect. Feeding them as one flat string is what made the first
+    benchmark batch run for six minutes: the model did not recognise the
+    prefix, so it did not stop.
+    """
     subcat = normalise_subcat(subcat)
     system = SYSTEM_PROMPTS.get(
         subcat, BASE_SYSTEM + "Always put your final answer inside \\boxed{}.")
@@ -203,7 +294,7 @@ def build_benchmark_prompt(problem: str, subcat: str,
         user = f"{PREAMBLE}\n\n{problem}\n\n"
     else:
         user = f"{PREAMBLE}\n\n{task_for(subcat, size)}\n\n{problem}\n\n"
-    return f"{system}\n\n{user}"
+    return system, user
 
 
 def split_problem(problem: str, subcat: str, size: str | None = None):

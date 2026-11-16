@@ -52,7 +52,7 @@ def main() -> int:
         print(f"  torch.nn.attention not available: {exc}")
         backends = []
 
-    tok, model = load_model("Qwen/Qwen3-1.7B-Base", "runs/vslm")
+    tok, model = load_model("Qwen/Qwen3-1.7B", "runs/vslm")
     print(f"  attn_implementation: "
           f"{getattr(model.config, '_attn_implementation', 'default')}")
 

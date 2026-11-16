@@ -1,4 +1,4 @@
-"""QLoRA fine-tuning for Qwen3-1.7B-Base on a 12 GB card.
+"""QLoRA fine-tuning for Qwen3-1.7B on a 12 GB card.
 
 This is a plain PyTorch loop rather than a Trainer class, for two reasons: the
 prompt tokens must be masked out of the loss exactly, and the loop has to
@@ -42,22 +42,45 @@ def read_jsonl(path: str) -> list[dict]:
     return out
 
 
-def tokenise_rows(rows: list[dict], tokenizer, max_len: int | None = 2048):
+def tokenise_rows(rows: list[dict], tokenizer, max_len: int | None = 2048,
+                  add_eos: bool = True, thinking: bool | None = None):
     """Tokenise every row into (input_ids, labels).
 
     Prompt tokens are masked, so only the completion is supervised. A
     max_len of None leaves the sequence untruncated, which is how the speed
     test measures what the corpus actually needs.
+
+    The prompt is rendered through the tokenizer's chat template. The
+    corpus row carries the system turn and the user turn separately, and
+    the benchmark sends the same two turns, so training and scoring see
+    byte-identical prompts. The first fine-tune did not do this: it trained
+    on the bare question and was scored with the benchmark's system prompt
+    glued to the front as plain text. The model was answering a prompt it
+    had never seen, and it did not stop.
+
+    `add_eos` puts the turn-ending token at the end of the supervised
+    completion. Without it the model is never taught to stop, and at
+    inference it generates until it hits the token cap: every problem costs
+    the full 2048 tokens and most of that text is thrown away. With the
+    instruct checkpoint the turn-ender is <|im_end|>, which is the token
+    its weights are already trained to emit after a finished answer.
     """
+    from .benchprompt import DEFAULT_THINKING, row_prompt
+
+    if thinking is None:
+        thinking = DEFAULT_THINKING
+
     items: list[tuple[list[int], list[int]]] = []
+    eos_id = getattr(tokenizer, "eos_token_id", None)
     for row in rows:
-        prompt = row["prompt"] if "prompt" in row else \
-            f"### Problem\n{row['question']}\n\n### Scratchpad\n"
+        prompt = row_prompt(row, tokenizer, thinking=thinking)
         completion = row["completion"] if "completion" in row else \
             f"{row['scratchpad']}\n### Answer\n{row['answer']}\n### Plot\n" \
             f"{json.dumps(row.get('spec') or {}, separators=(',', ':'))}\n"
         p_ids = tokenizer(prompt, add_special_tokens=False)["input_ids"]
         c_ids = tokenizer(completion, add_special_tokens=False)["input_ids"]
+        if add_eos and eos_id is not None:
+            c_ids = c_ids + [eos_id]
         if max_len is not None:
             ids = (p_ids + c_ids)[:max_len]
             labels = ([IGNORE] * len(p_ids) + c_ids)[:max_len]
@@ -173,6 +196,39 @@ def build_model(base: str, adapter_out: str | None, rank: int, alpha: int,
     model = get_peft_model(model, lcfg)
     model.print_trainable_parameters()
     return tok, model
+
+
+def save_generation_config(model, tok, out_dir: str) -> None:
+    """Write a generation_config next to the adapter.
+
+    Without one, the model that comes back from disk carries whatever the
+    base checkpoint happened to have, and the turn-ending token may not be
+    among the stop tokens. The generation then runs to the token cap on
+    every problem. The config names the turn-ender explicitly, so the
+    model stops when it has finished its answer.
+    """
+    try:
+        from transformers import GenerationConfig
+    except Exception:
+        return
+    eos_ids = []
+    for tid in (tok.eos_token_id,):
+        if isinstance(tid, int):
+            eos_ids.append(tid)
+    # the chat turn-ender, if the tokenizer has one and it is not already
+    # in the list
+    im_end = tok.convert_tokens_to_ids("<|im_end|>")
+    if isinstance(im_end, int) and im_end >= 0 and im_end not in eos_ids:
+        eos_ids.append(im_end)
+    if not eos_ids:
+        return
+    try:
+        cfg = GenerationConfig(eos_token_id=eos_ids,
+                               pad_token_id=tok.pad_token_id)
+        cfg.save_pretrained(out_dir)
+        print(f"  generation config: eos_token_id={eos_ids}")
+    except Exception as exc:
+        print(f"  could not write the generation config: {exc}")
 
 
 def cosine_lr(step: int, total: int, warmup: int, peak: float) -> float:
@@ -358,7 +414,7 @@ def speed_test(args, rows, tok, pad_id) -> int:
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="QLoRA fine-tune Qwen3-1.7B")
-    ap.add_argument("--base", default="Qwen/Qwen3-1.7B-Base")
+    ap.add_argument("--base", default="Qwen/Qwen3-1.7B")
     ap.add_argument("--data", default="data/train.jsonl")
     ap.add_argument("--out", default="runs/vslm")
     ap.add_argument("--epochs", type=float, default=1.0,
@@ -606,6 +662,7 @@ def main(argv=None) -> int:
 
     model.save_pretrained(args.out)
     tok.save_pretrained(args.out)
+    save_generation_config(model, tok, args.out)
     with open(os.path.join(args.out, "train_args.json"), "w") as fh:
         json.dump(vars(args), fh, indent=2)
     print(f"saved adapter to {args.out}")

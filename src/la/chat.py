@@ -24,7 +24,7 @@ from .render import render
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="Ask the model a question")
-    ap.add_argument("--base", default="Qwen/Qwen3-1.7B-Base")
+    ap.add_argument("--base", default="Qwen/Qwen3-1.7B")
     ap.add_argument("--adapter", default="runs/vslm")
     ap.add_argument("--question", default="")
     ap.add_argument("--max-new-tokens", type=int, default=2048)

@@ -37,7 +37,7 @@ from .schema import features_match, spec_features
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="Evaluate the model")
-    ap.add_argument("--base", default="Qwen/Qwen3-1.7B-Base")
+    ap.add_argument("--base", default="Qwen/Qwen3-1.7B")
     ap.add_argument("--adapter", default="runs/vslm")
     ap.add_argument("--data", default="data/test.jsonl")
     ap.add_argument("--limit", type=int, default=0)

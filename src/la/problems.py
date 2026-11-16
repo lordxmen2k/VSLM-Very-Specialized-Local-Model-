@@ -75,8 +75,13 @@ class Problem:
         # had never been trained on.
         d["prompt"] = self.prompt()
         d["completion"] = self.completion()
+        # the chat turns, stored separately so the chat template can be
+        # rendered at training time by the tokenizer that will be used, and
+        # so the benchmark can render the same prompt with the same
+        # tokenizer
+        d["system"] = self.system_prompt()
+        d["user"] = self.user_prompt()
         return d
-
     @staticmethod
     def from_json(d: dict) -> "Problem":
         return Problem(
@@ -92,7 +97,28 @@ class Problem:
 
         The question already carries the benchmark's preamble, the task and
         the body, so it is passed through as it stands.
+
+        The chat template is not applied here. The corpus is built without
+        a tokenizer - it is text generation, and it must stay reproducible
+        from a seed on any machine - so the row stores the system and user
+        turns separately and the template is rendered once, at training time,
+        by the tokenizer that will actually be used. The benchmark renders
+        it the same way, with the same tokenizer.
         """
+        return self.question
+
+    def system_prompt(self) -> str:
+        """The system turn the benchmark sends with this problem.
+
+        The benchmark varies it by subcategory. The corpus families that
+        the benchmark scores are mapped onto the benchmark's own wording;
+        the families the benchmark does not have get the general one.
+        """
+        from .benchprompt import system_prompt_for
+        return system_prompt_for(self.family)
+
+    def user_prompt(self) -> str:
+        """The user turn: the question, as the benchmark sends it."""
         return self.question
 
     def completion(self) -> str:

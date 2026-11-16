@@ -4,10 +4,20 @@
 # run can be described in one place and reproduced.
 
 model:
-  # The base model. The Base checkpoint is used rather than the instruct
-  # release because this project defines the output format wholesale and
-  # there is no chat behaviour to preserve.
-  base: Qwen/Qwen3-1.7B-Base
+  # The base model.
+  #
+  # This is the instruction-tuned checkpoint, not the Base release. Qwen
+  # ships one tuned release for Qwen3-1.7B and calls it Qwen/Qwen3-1.7B;
+  # there is no separate "-Instruct" name for it. It carries a ChatML chat
+  # template and its weights are trained to end a turn with <|im_end|>.
+  #
+  # The first fine-tune used Qwen3-1.7B-Base, trained on raw text with no
+  # template, and was scored with the benchmark's system prompt prepended as
+  # plain text. Two things followed: the model was answering a prompt format
+  # it had never seen, and it had never been taught to stop, so every
+  # generation ran to the token cap. The first benchmark batch did not
+  # finish in six minutes.
+  base: Qwen/Qwen3-1.7B
   # The card this was tuned for.
   gpu: RTX 4070 12 GB
   dtype: bfloat16

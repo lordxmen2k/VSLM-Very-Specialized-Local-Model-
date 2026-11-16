@@ -36,7 +36,7 @@ import time
 import urllib.request
 
 from .answer import answers_equal, parse_answer
-from .benchprompt import build_benchmark_prompt, has_task
+from .benchprompt import benchmark_prompt_pair, build_benchmark_prompt, has_task
 from .grading import (extract_boxed, extract_model_answer, normalise_reference)
 
 # The model is not needed to grade one. la.inference imports torch at module
@@ -121,10 +121,14 @@ def fetch_linalg(cache_dir: str = "bench_cache") -> list[dict]:
                 if not q or not a:
                     continue
                 subcat = _pick(row, "task")
+                system, user = benchmark_prompt_pair(q, subcat, size)
                 problems.append({"size": size, "question": q, "answer": a,
                                  "id": _pick(row, "id"), "task": subcat,
                                  "instructed": has_task(q),
-                                 "prompt": build_benchmark_prompt(q, subcat, size)})
+                                 # the chat turns, so the benchmark sends the
+                                 # same prompt the corpus was trained on
+                                 "system": system, "user": user,
+                                 "prompt": f"{system}\n\n{user}"})
     return problems
 
 
@@ -270,7 +274,7 @@ def measure_perf(tok, model, prompts: list[str], batch_sizes=(1, 4, 8),
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="Benchmark against published results")
-    ap.add_argument("--base", default="Qwen/Qwen3-1.7B-Base")
+    ap.add_argument("--base", default="Qwen/Qwen3-1.7B")
     ap.add_argument("--adapter", default="runs/vslm")
     ap.add_argument("--benchmark", default="linalg",
                     choices=["linalg", "internal"], help="which benchmark to run")
@@ -297,13 +301,19 @@ def main(argv=None) -> int:
             rows = rows[: args.limit]
         problems = [{"size": str(r.get("difficulty", "?")), "question": r["question"],
                      "answer": r["truth"], "id": r.get("family", ""),
-                     "task": r.get("family", "")} for r in rows]
+                     "task": r.get("family", ""),
+                     "system": r.get("system", ""), "user": r.get("user", r["question"])}
+                    for r in rows]
         print(f"{len(problems)} internal held-out problems")
 
     adapter = args.adapter if os.path.isdir(args.adapter) else None
     tok, model = _load_model(args.base, adapter)
+    # the chat turns, so the benchmark sends exactly the prompt the corpus
+    # was trained on, rendered by the same tokenizer
+    pairs = [(p.get("system", ""), p.get("user", p["question"]))
+             for p in problems]
     t0 = time.time()
-    outs = _generate(tok, model, [p["prompt"] for p in problems],
+    outs = _generate(tok, model, pairs,
                      max_new_tokens=args.max_new_tokens,
                      temperature=args.temperature, batch_size=args.batch_size,
                      label="benchmark")
@@ -321,7 +331,7 @@ def main(argv=None) -> int:
         torch.cuda.empty_cache()
         tok2, base_model = _load_model(args.base, None)
         t0 = time.time()
-        base_outs = _generate(tok2, base_model, [p["prompt"] for p in problems],
+        base_outs = _generate(tok2, base_model, pairs,
                               max_new_tokens=args.max_new_tokens,
                               temperature=args.temperature, batch_size=args.batch_size,
                               label="base model")

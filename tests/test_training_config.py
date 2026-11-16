@@ -105,7 +105,8 @@ class TestDatasetIsTokenisedOnce(unittest.TestCase):
                  "spec": {}}]
         ds = ProblemDataset(rows, fake_tokenizer, max_len=64)
         n_at_build = len(calls)
-        self.assertEqual(2, n_at_build, "the corpus should be tokenised once, "
+        # two calls per row: one for the prompt, one for the completion
+        self.assertEqual(4, n_at_build, "the corpus should be tokenised once, "
                                         "up front")
         for i in range(len(ds)):
             ds[i]

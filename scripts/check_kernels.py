@@ -52,7 +52,7 @@ def main() -> int:
 
     print()
     print("=== the model ===")
-    tok, model = load_model("Qwen/Qwen3-1.7B-Base", "runs/vslm")
+    tok, model = load_model("Qwen/Qwen3-1.7B", "runs/vslm")
     print(f"  device              : {model.device}")
     print(f"  dtype               : {model.dtype}")
     print(f"  attn_implementation : "

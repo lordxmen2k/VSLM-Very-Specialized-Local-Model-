@@ -48,7 +48,31 @@ def load_model(base: str, adapter: str | None = None, dtype=torch.bfloat16):
     return tok, model
 
 
-from .benchprompt import model_prompt as build_prompt
+from .benchprompt import DEFAULT_THINKING, model_prompt as build_prompt, render_chat
+
+
+def stop_token_ids(tok, model=None) -> list[int] | None:
+    """The tokens that mean the model has finished.
+
+    The tokenizer's own end-of-text, plus the chat turn-ender when there is
+    one. The instruction-tuned checkpoint ends a turn with <|im_end|> and its
+    weights are trained to emit it; the base checkpoint does not, and
+    generation runs to the token cap instead.
+
+    A generation_config saved with the adapter carries the same list, so
+    this is a belt-and-braces check that also works with an adapter that
+    was trained before the config was written.
+    """
+    ids: list[int] = []
+    for tid in (tok.eos_token_id,):
+        if isinstance(tid, int):
+            ids.append(tid)
+    im_end = tok.convert_tokens_to_ids("<|im_end|>")
+    if isinstance(im_end, int) and im_end >= 0 and im_end not in ids:
+        ids.append(im_end)
+    if not ids:
+        return None
+    return ids
 
 
 def generate(tok, model, questions: list[str], max_new_tokens: int = 1024,
@@ -73,6 +97,7 @@ def generate(tok, model, questions: list[str], max_new_tokens: int = 1024,
     stop = threading.Event()
     n_batches = (total + batch_size - 1) // batch_size
     state = {"batch": 1}
+    eos = stop_token_ids(tok, model)
 
     def heartbeat() -> None:
         while not stop.wait(HEARTBEAT_SECONDS):
@@ -86,19 +111,28 @@ def generate(tok, model, questions: list[str], max_new_tokens: int = 1024,
     thread.start()
     try:
         return _run_batches(tok, model, questions, outs, max_new_tokens,
-                            temperature, batch_size, label, total, t0, state)
+                            temperature, batch_size, label, total, t0, state,
+                            eos_token_id=eos)
     finally:
         stop.set()
         thread.join(timeout=1.0)
 
 
 def _run_batches(tok, model, questions, outs, max_new_tokens, temperature,
-                 batch_size, label, total, t0, state):
+                 batch_size, label, total, t0, state, eos_token_id=None,
+                 thinking=DEFAULT_THINKING):
     n_batches = (total + batch_size - 1) // batch_size
     for n, i in enumerate(range(0, total, batch_size)):
         state["batch"] = n + 1
         chunk = questions[i: i + batch_size]
-        prompts = [build_prompt(q) for q in chunk]
+        prompts = []
+        for q in chunk:
+            if isinstance(q, (tuple, list)) and len(q) == 2:
+                # a (system, user) pair, rendered through the chat template
+                prompts.append(render_chat(tok, q[0], q[1],
+                                           thinking=thinking))
+            else:
+                prompts.append(build_prompt(q))
         enc = tok(prompts, return_tensors="pt", padding=True,
                   add_special_tokens=False).to(model.device)
         with torch.no_grad():
@@ -109,11 +143,12 @@ def _run_batches(tok, model, questions, outs, max_new_tokens, temperature,
                 temperature=temperature if temperature > 0 else None,
                 top_p=0.9 if temperature > 0 else None,
                 pad_token_id=tok.pad_token_id,
+                eos_token_id=eos_token_id,
             )
         for j in range(len(chunk)):
             new = gen[j][enc["input_ids"].shape[1]:]
             outs.append(tok.decode(new, skip_special_tokens=True))
-        done = min(i + batch_size, total)
+        done = min(i + len(chunk), total)
         print(progress_line(label, done, total, time.time() - t0,
                              batch=n + 1, batches=n_batches), flush=True)
     return outs
