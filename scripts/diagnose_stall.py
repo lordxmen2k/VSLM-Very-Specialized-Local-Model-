@@ -16,7 +16,7 @@ import torch
 
 from la.inference import load_model
 
-BASE = "Qwen/Qwen3-1.7B"
+BASE = "Qwen/Qwen3-1.7B-Base"
 ADAPTER = "runs/vslm"
 
 PROMPT = (

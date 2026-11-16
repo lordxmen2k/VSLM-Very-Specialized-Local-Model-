@@ -39,7 +39,55 @@ def bench(fn, n=20):
     return (time.time() - t) / n
 
 
-def main() -> int:
+def report_cache_space() -> None:
+    """How much room the Hugging Face cache has, and where it is.
+
+    A download that dies part way through with "Internal Writer Error:
+    Background writer channel closed" is usually a full disk, not a
+    network fault. This says which disk the cache is on and how much room
+    is left, before anything is downloaded.
+    """
+    import shutil
+    try:
+        from huggingface_hub import constants as hf_constants
+        cache = hf_constants.HF_HUB_CACHE
+    except Exception:
+        cache = os.path.join(os.path.expanduser("~"), ".cache", "huggingface",
+                             "hub")
+    print(f"  HF_HUB_CACHE : {cache}")
+    try:
+        # the cache directory may not exist yet, so walk up to the nearest
+        # parent that does and measure that
+        probe = cache
+        while probe and not os.path.isdir(probe):
+            parent = os.path.dirname(probe)
+            if parent == probe:
+                break
+            probe = parent
+        usage = shutil.disk_usage(probe)
+        print(f"  measured on  : {probe}")
+        print(f"  free         : {usage.free / 1e9:.2f} GB "
+              f"of {usage.total / 1e9:.1f} GB")
+        if usage.free < 5e9:
+            print("  WARNING: less than 5 GB free. A 1.7B checkpoint needs")
+            print("  about 4 GB, and a partial download fails in a way that")
+            print("  looks like a network error. Set HF_HOME to a drive with")
+            print("  room before running this.")
+    except Exception as exc:
+        print(f"  could not read the free space: {exc}")
+
+
+def main(argv=None) -> int:
+    import argparse
+    ap = argparse.ArgumentParser(description=__doc__)
+    # The Base checkpoint is the default because it is the one already on
+    # disk: this diagnostic measures the hardware path, and the weights do
+    # not change it. Point it at Qwen/Qwen3-1.7B to measure the instruct
+    # checkpoint, but that one may need downloading.
+    ap.add_argument("--base", default="Qwen/Qwen3-1.7B-Base")
+    ap.add_argument("--adapter", default="runs/vslm")
+    args = ap.parse_args(argv)
+
     print("=== what backends does this build have? ===")
     try:
         from torch.nn.attention import SDPBackend, sdpa_kernel
@@ -52,7 +100,11 @@ def main() -> int:
         print(f"  torch.nn.attention not available: {exc}")
         backends = []
 
-    tok, model = load_model("Qwen/Qwen3-1.7B", "runs/vslm")
+    print()
+    print("=== the cache, before anything is downloaded ===")
+    report_cache_space()
+
+    tok, model = load_model(args.base, args.adapter)
     print(f"  attn_implementation: "
           f"{getattr(model.config, '_attn_implementation', 'default')}")
 

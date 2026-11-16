@@ -50,7 +50,7 @@ def run(tok, model, prompts, label, max_new_tokens=2048):
 
 def main() -> int:
     print("loading the model ...", flush=True)
-    tok, model = load_model("Qwen/Qwen3-1.7B", "runs/vslm")
+    tok, model = load_model("Qwen/Qwen3-1.7B-Base", "runs/vslm")
     print(f"  use_cache = {model.config.use_cache}", flush=True)
     print(f"  dtype     = {model.dtype}", flush=True)
 
