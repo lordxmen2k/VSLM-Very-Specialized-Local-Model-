@@ -37,6 +37,14 @@ class TestProgressLine(unittest.TestCase):
         line = progress_line("x", 0, 660, 60.0)
         self.assertIn("about ? min left", line)
 
+    def test_a_meaningless_rate_does_not_produce_a_meaningless_estimate(self):
+        """One problem in a second is a rate of one, but one problem in an
+        hour is not worth extrapolating from."""
+        line = progress_line("x", 1, 660, 3600.0)
+        self.assertIn("about ? min left", line)
+        line = progress_line("x", 1, 660, 1.0)
+        self.assertNotIn("about ? min left", line)
+
     def test_the_count_only_ever_grows(self):
         seen = [progress_line("x", d, 660, 60.0 * (d + 1))
                 for d in range(0, 660, 40)]
