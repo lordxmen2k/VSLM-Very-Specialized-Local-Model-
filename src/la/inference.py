@@ -21,9 +21,13 @@ import json
 import os
 import re
 import time
+import threading
+
 from typing import Any
 
 import torch
+
+from .progress import HEARTBEAT_SECONDS, progress_line
 
 from .parse import extract_json, parse_completion, summarise_answer
 
@@ -61,6 +65,32 @@ def generate(tok, model, questions: list[str], max_new_tokens: int = 1024,
     t0 = time.time()
     print(f"  {label}: starting, {total} problems, {batch_size} at a time",
           flush=True)
+
+    # A heartbeat on its own thread. A batch that takes minutes prints
+    # nothing on the main thread, and a long silence is what makes a run
+    # look dead. This prints the elapsed time every minute whatever the
+    # batch is doing.
+    stop = threading.Event()
+
+    def heartbeat() -> None:
+        while not stop.wait(HEARTBEAT_SECONDS):
+            el = time.time() - t0
+            done = len(outs)
+            line = progress_line(label, done, total, el)
+            print(f"{line}  (still working)", flush=True)
+
+    thread = threading.Thread(target=heartbeat, daemon=True)
+    thread.start()
+    try:
+        return _run_batches(tok, model, questions, outs, max_new_tokens,
+                            temperature, batch_size, label, total, t0)
+    finally:
+        stop.set()
+        thread.join(timeout=1.0)
+
+
+def _run_batches(tok, model, questions, outs, max_new_tokens, temperature,
+                 batch_size, label, total, t0):
     for n, i in enumerate(range(0, total, batch_size)):
         chunk = questions[i: i + batch_size]
         prompts = [build_prompt(q) for q in chunk]
@@ -79,13 +109,7 @@ def generate(tok, model, questions: list[str], max_new_tokens: int = 1024,
             new = gen[j][enc["input_ids"].shape[1]:]
             outs.append(tok.decode(new, skip_special_tokens=True))
         done = min(i + batch_size, total)
-        if done == total or (n + 1) % 5 == 0:
-            el = time.time() - t0
-            rate = done / max(el, 1e-9)
-            left = (total - done) / max(rate, 1e-9)
-            print(f"  {label}: {done}/{total}  ({rate:.1f}/s, "
-                  f"about {left/60:.0f} min left, {el/60:.0f} min elapsed)",
-                  flush=True)
+        print(progress_line(label, done, total, time.time() - t0), flush=True)
     return outs
 
 

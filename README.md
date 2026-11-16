@@ -617,6 +617,25 @@ prompt it had never seen, and the answer it wrote could not be read. Fixing
 the prompt took the held-out set from 45 % to 54.5 %, and boxing the answer
 took the unreadable answers from 23 in 200 to none.
 
+### Watching a long run
+
+Every long command reports what it is doing. A generation prints a line
+after each batch and a heartbeat every minute on a thread of its own, so
+a slow batch cannot produce silence:
+
+```
+  benchmark: starting, 660 problems, 8 at a time
+  benchmark: 8/660  (0.9/s, about 12 min left, 0 min elapsed)
+  benchmark: 8/660  (0.9/s, about 12 min left, 1 min elapsed)  (still working)
+  benchmark: 16/660  (0.9/s, about 11 min left, 2 min elapsed)
+```
+
+To see it without a GPU:
+
+```
+python scripts/demo_progress.py
+```
+
 ### The published benchmark
 
 > **Read the 4×4 column with care.** LinAlg-Bench's 4×4 questions are a bare
