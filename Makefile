@@ -118,3 +118,9 @@ speed-test:
 clean:
 	rm -rf runs/ outputs/ .pytest_cache/
 	find . -name '__pycache__' -type d -exec rm -rf {} +
+
+check:
+	$(PYTHON) -m unittest discover -s tests
+	$(PYTHON) -m la.check_arithmetic --n 40
+	$(PYTHON) -m la.build_dataset --n-train 40 --n-test 8 --seed 7 \
+		--out data/check --render-first 2

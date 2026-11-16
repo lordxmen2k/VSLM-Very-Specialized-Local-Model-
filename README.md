@@ -1,5 +1,7 @@
 # VSLM — a linear algebra model you can train on one 12 GB card
 
+![CI](https://github.com/lordxmen2k/VSLM-Very-Specialized-Local-Model--/actions/workflows/ci.yml/badge.svg)
+
 **Very Specialised Local Model.** A QLoRA fine-tune of `Qwen3-1.7B-Base` that
 answers linear algebra questions, shows its working, and draws the figure.
 
@@ -38,6 +40,7 @@ found along the way are written down rather than quietly fixed — see
 - [Five decisions that shape everything](#five-decisions-that-shape-everything)
 - [How it fits on a 12 GB card](#how-it-fits-on-a-12-gb-card)
 - [Install](#install)
+- [Model card](MODEL_CARD.md)
 - [The commands](#the-commands)
 - [Reading the results](#reading-the-results)
 - [When something goes wrong](#when-something-goes-wrong)
@@ -607,7 +610,7 @@ full account is in [docs/HOW-IT-WORKS.md](docs/HOW-IT-WORKS.md).
 |---|---|---|---|---|
 | training prompt | our own | our own | double-wrapped | **the benchmark's** |
 | final loss | 0.0661 | 0.0462 | 0.0329 | **0.0299** |
-| held-out score | 46.0 % | 50.5 % | 45.0 % | **54.5 %** |
+| held-out score (in-distribution) | 46.0 % | 50.5 % | 45.0 % | **54.5 %** |
 | no answer produced | — | — | 23/200 | **0/200** |
 | plot kind correct | — | 94 % | — | **97 %** |
 
@@ -635,6 +638,23 @@ To see it without a GPU:
 ```
 python scripts/demo_progress.py
 ```
+
+### What the numbers mean
+
+There are two measurements in this project and they are not the same thing.
+
+The **held-out score** is 200 problems from the same seventeen generators
+as the training corpus, with a different seed. It measures generalisation
+*within the taught families*. It does not measure linear algebra.
+
+**LinAlg-Bench** is 660 problems from a third-party benchmark with
+different wordings and a different generator. It is the only measurement
+here that does not depend on the training data, and it is the one worth
+quoting.
+
+The first fine-tuned model scored *below* the base model on that benchmark —
+17.0 against 29.5 — for a reason that had nothing to do with mathematics.
+See [the model card](MODEL_CARD.md) for what happened and what it cost.
 
 ### The published benchmark
 
