@@ -166,7 +166,7 @@ _TOKEN = re.compile(
       | (?P<rbrace>\\})
       | (?P<num>\d+(?:\.\d+)?(?:[eE][-+]?\d+)?)
       | (?P<name>[A-Za-z][A-Za-z0-9_]*)
-      | (?P<op>[+\-*/=,&{}\[\]().])
+      | (?P<op>[+\-*/=,&{}\[\]().^])
     )""",
     re.VERBOSE,
 )
@@ -240,6 +240,11 @@ def _parse_factor(lex: _Lexer) -> sp.Expr:
         return -_parse_factor(lex)
     if k == "op" and v == "+":
         return _parse_factor(lex)
+    if k == "op" and v == "(":
+        # a parenthesised base: (2)^{\frac{71}{348}}
+        inner = _parse_scalar(lex)
+        lex.expect("op")          # ')'
+        return _maybe_power(lex, inner)
     if k == "frac":
         lex.expect("op")          # '{'
         num = _parse_scalar(lex)
@@ -247,19 +252,40 @@ def _parse_factor(lex: _Lexer) -> sp.Expr:
         lex.expect("op")          # '{'
         den = _parse_scalar(lex)
         lex.expect("op")          # '}'
-        return sp.cancel(num / den)
+        return _maybe_power(lex, sp.cancel(num / den))
     if k == "sqrt":
         lex.expect("op")          # '{'
         inner = _parse_scalar(lex)
         lex.expect("op")          # '}'
-        return sp.sqrt(inner)
+        return _maybe_power(lex, sp.sqrt(inner))
     if k == "num":
-        return sp.Rational(v) if "." not in v else sp.Float(v)
+        base = sp.Rational(v) if "." not in v else sp.Float(v)
+        return _maybe_power(lex, base)
     if k == "name":
         if v == "i":
-            return sp.I
-        return sp.Symbol(v)
+            return _maybe_power(lex, sp.I)
+        return _maybe_power(lex, sp.Symbol(v))
     raise ValueError(f"unexpected token {k} ({v!r}) in a scalar")
+
+
+def _maybe_power(lex: _Lexer, base: sp.Expr) -> sp.Expr:
+    """Apply an exponent to a base, if one follows.
+
+    The grammar had no '^' token at all, so a value written the way sympy
+    prints a product of prime powers - (2)^{\\frac{71}{348}} *
+    (3)^{\\frac{17}{87}} - could not be read back at all. It turns up in the
+    orthonormalisation answers, where the norm of the second Gram-Schmidt
+    vector is an irrational with no compact radical form, and the grader
+    rejected those answers outright.
+    """
+    k, v = lex.peek()
+    if k == "op" and v == "^":
+        lex.next()
+        lex.expect("op")          # '{'
+        exp = _parse_scalar(lex)
+        lex.expect("op")          # '}'
+        return sp.Pow(base, exp)
+    return base
 
 
 def _parse_matrix(lex: _Lexer) -> sp.Matrix:
@@ -279,26 +305,15 @@ def _parse_matrix(lex: _Lexer) -> sp.Matrix:
             row.append(_parse_scalar(lex))
             lex.expect("op")      # '}'
             continue
-        # a bare entry
-        if k == "num":
-            row.append(sp.Rational(v) if "." not in v else sp.Float(v))
-            continue
-        if k == "name":
-            row.append(sp.I if v == "i" else sp.Symbol(v))
-            continue
-        if k == "frac":
-            lex.i -= 1
-            row.append(_parse_factor(lex))
-            continue
-        if k == "sqrt":
-            lex.i -= 1
-            row.append(_parse_factor(lex))
-            continue
-        if k == "op" and v == "-":
-            lex.i -= 1
-            row.append(_parse_factor(lex))
-            continue
-        raise ValueError(f"unexpected token {k} ({v!r}) in a matrix")
+        # A bare entry. It is parsed as a term and not as a single factor, so
+        # that a cell holding a product of factors reads as one entry:
+        # \frac{1}{10}\sqrt{10} and 2\sqrt{10} are products, and treating
+        # them as one factor each left the row short and the matrix
+        # "ragged". Every orthonormalisation answer in the corpus is written
+        # that way, and the grader rejected 28 per cent of them - correct
+        # answers scored wrong.
+        lex.i -= 1
+        row.append(_parse_term(lex))
     rows.append(row)
     width = len(rows[0])
     if any(len(r) != width for r in rows):

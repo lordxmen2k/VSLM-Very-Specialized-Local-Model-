@@ -102,5 +102,73 @@ class TestAnswerGrammar(unittest.TestCase):
         self.assertFalse(answers_equal(D1, D2))
 
 
+class TestMatrixCellsHoldingAProduct(unittest.TestCase):
+    """A cell may hold a product of factors, and it is one entry.
+
+    The matrix parser read a cell with _parse_factor, which handles one
+    factor. A cell holding \\frac{1}{10}\\sqrt{10} is two factors, so the
+    row came out one entry short and the matrix was reported as ragged.
+    Every orthonormalisation answer in the corpus is written that way, and
+    the grader marked 28 per cent of them wrong when the model had them
+    exactly right.
+    """
+
+    def test_a_product_of_factors_is_one_entry(self):
+        M = sp.Matrix([[sp.sqrt(10) / 10, 0], [0, 1]])
+        back = parse_answer(r"\begin{pmatrix} \frac{1}{10}\sqrt{10} & 0 \\ 0 & 1 \end{pmatrix}")
+        self.assertEqual(back.shape, (2, 2))
+        self.assertTrue(answers_equal(back, M))
+
+    def test_a_number_times_a_sqrt_is_one_entry(self):
+        M = sp.Matrix([[2 * sp.sqrt(10), 0], [0, 1]])
+        back = parse_answer(r"\begin{pmatrix} 2\sqrt{10} & 0 \\ 0 & 1 \end{pmatrix}")
+        self.assertEqual(back.shape, (2, 2))
+        self.assertTrue(answers_equal(back, M))
+
+    def test_a_ragged_matrix_is_still_rejected(self):
+        """The fix must not make every matrix parse: a matrix with rows of
+        different widths is still a ragged matrix."""
+        with self.assertRaises(ValueError):
+            parse_answer(r"\begin{pmatrix} 1 & 2 & 3 \\ 4 & 5 \end{pmatrix}")
+
+
+class TestPowers(unittest.TestCase):
+    """The grammar has to read a product of prime powers.
+
+    sympy prints an irrational with no compact radical form as
+    (2)^{\\frac{71}{348}} * (3)^{\\frac{17}{87}}, and the grammar had no '^'
+    token at all, so it could not read that back. It turns up in the
+    orthonormalisation answers, and those answers were rejected outright.
+    """
+
+    def test_a_parenthesised_base_with_an_exponent(self):
+        back = parse_answer(r"(2)^{\frac{71}{348}}")
+        self.assertTrue(answers_equal(back, 2 ** sp.Rational(71, 348)))
+
+    def test_a_bare_base_with_an_exponent(self):
+        back = parse_answer(r"2^{\frac{71}{348}}")
+        self.assertTrue(answers_equal(back, 2 ** sp.Rational(71, 348)))
+
+    def test_a_product_of_prime_powers(self):
+        text = (r"(2)^{\frac{71}{348}} * (3)^{\frac{17}{87}} * (5)^{\frac{1}{3}}")
+        expected = (2 ** sp.Rational(71, 348) * 3 ** sp.Rational(17, 87)
+                    * 5 ** sp.Rational(1, 3))
+        self.assertTrue(answers_equal(parse_answer(text), expected))
+
+    def test_a_power_inside_a_matrix_cell(self):
+        M = sp.Matrix([[2 ** sp.Rational(71, 348), 0], [0, 1]])
+        back = parse_answer(
+            r"\begin{pmatrix} (2)^{\frac{71}{348}} & 0 \\ 0 & 1 \end{pmatrix}")
+        self.assertEqual(back.shape, (2, 2))
+        self.assertTrue(answers_equal(back, M))
+
+    def test_a_sqrt_still_round_trips(self):
+        """The new power handling must not change what a square root means."""
+        self.assertTrue(answers_equal(parse_answer(r"\sqrt{10}"),
+                                       sp.sqrt(10)))
+        self.assertTrue(answers_equal(parse_answer(r"\frac{1}{2}"),
+                                       sp.Rational(1, 2)))
+
+
 if __name__ == "__main__":
     unittest.main()
