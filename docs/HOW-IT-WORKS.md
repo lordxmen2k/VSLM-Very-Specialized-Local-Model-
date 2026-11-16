@@ -547,20 +547,36 @@ shows how each multiplier was found:
   the multiplier for row 2 is (-3)/(-2) = 3/2, so row 2 -= (3/2) * row 1
 ```
 
-### The three runs
+### The four runs
 
-| | run 1 | run 2 | run 3 |
-|---|---|---|---|
-| corpus | terse | derivations | derivations, benchmark format |
-| final loss | 0.0661 | 0.0462 | **0.0329** |
-| minutes | 153.4 | 142.7 | 159.7 |
-| tokens per second | 704 | 885 | ~950 |
-| held-out score | 46.0 % | 50.5 % | — |
-| benchmark score | 17.0 % | — | — |
+| | run 1 | run 2 | run 3 | run 4 |
+|---|---|---|---|---|
+| corpus | terse | derivations | derivations, benchmark questions | + answers boxed, one prompt |
+| training prompt | our own | our own | double-wrapped | **the benchmark's** |
+| final loss | 0.0661 | 0.0462 | 0.0329 | **0.0299** |
+| minutes | 153.4 | 142.7 | 159.7 | 191.3 |
+| held-out, benchmark prompt | 46.0 % | — | 7.0 % | **54.5 %** |
+| no answer produced | — | — | 23/200 | **0/200** |
+| plot kind correct | — | 94 % | — | **97 %** |
 
-The loss halves across the three runs as the corpus gets closer to something
-a model can actually be taught. Run 3 is the first one whose corpus is
-written in the format it is scored in.
+The loss falls by half across the four runs as the corpus gets closer to
+something a model can actually be taught, and the held-out score rises with
+it.
+
+Two of the steps are worth naming separately, because each one is a single
+mistake rather than a modelling decision.
+
+**Run 3 scored 7 % on the benchmark and 45 % on the held-out set.** The
+corpus had the benchmark's questions in it, but the training still wrapped
+the prompt in `### Problem` while the evaluation passed the bare question.
+The model was answering a prompt it had never seen and fell back on
+base-model behaviour: free prose with a boxed answer, which the grader could
+not read.
+
+**Run 4 trained on the benchmark's prompt and scored 54.5 %.** The whole
+difference between 45 % and 54.5 % was the prompt, and between 7 % and
+54.5 % was the prompt plus the boxing. Nothing about the mathematics
+changed.
 
 ### The second run
 

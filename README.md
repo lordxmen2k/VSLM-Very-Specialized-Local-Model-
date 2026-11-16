@@ -601,6 +601,22 @@ The corpus went from 672 to 826 characters per example and the sequence cap
 from 768 to 1,024 tokens, which takes an epoch from 2.5 hours to 3.2. The
 full account is in [docs/HOW-IT-WORKS.md](docs/HOW-IT-WORKS.md).
 
+### What the four runs showed
+
+| | run 1 | run 2 | run 3 | run 4 |
+|---|---|---|---|---|
+| training prompt | our own | our own | double-wrapped | **the benchmark's** |
+| final loss | 0.0661 | 0.0462 | 0.0329 | **0.0299** |
+| held-out score | 46.0 % | 50.5 % | 45.0 % | **54.5 %** |
+| no answer produced | — | — | 23/200 | **0/200** |
+| plot kind correct | — | 94 % | — | **97 %** |
+
+The loss halves and the score climbs, and the two biggest jumps were both
+formatting rather than mathematics: the model was being asked to answer a
+prompt it had never seen, and the answer it wrote could not be read. Fixing
+the prompt took the held-out set from 45 % to 54.5 %, and boxing the answer
+took the unreadable answers from 23 in 200 to none.
+
 ### The published benchmark
 
 > **Read the 4×4 column with care.** LinAlg-Bench's 4×4 questions are a bare
