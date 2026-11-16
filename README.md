@@ -1,6 +1,5 @@
 # VSLM — a linear algebra model you can train on one 12 GB card
 
-![CI](https://github.com/lordxmen2k/VSLM-Very-Specialized-Local-Model--/actions/workflows/ci.yml/badge.svg)
 
 **Very Specialised Local Model.** A QLoRA fine-tune of `Qwen3-1.7B-Base` that
 answers linear algebra questions, shows its working, and draws the figure.
