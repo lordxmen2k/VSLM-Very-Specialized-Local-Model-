@@ -372,3 +372,46 @@ torch one. torch's `scaled_dot_product_attention` takes `enable_gqa=True`
 and handles it natively; it is transformers that declines to use it when a
 mask is present, because a masked GQA call falls back to the math kernel,
 which is slower than expanding.
+
+### The bandwidth floor was wrong, and so was the conclusion
+
+The projection timings showed something that did not fit:
+
+| projection | MB | ms | GB/s | "floor" at 756 GB/s |
+|---|---|---|---|---|
+| `q_proj` | 8.4 | 0.0204 | 411 | 1.8× |
+| `k_proj` | 4.2 | 0.0153 | **274** | 2.8× |
+| `v_proj` | 4.2 | 0.0155 | **271** | 2.8× |
+| `o_proj` | 8.4 | 0.0131 | 641 | 1.2× |
+| `gate_proj` | 25.2 | 0.0218 | **1155** | 0.7× |
+| `up_proj` | 25.2 | 0.0190 | **1327** | 0.6× |
+
+**The MLP projections hit 1155 and 1327 GB/s.** The card's *specification*
+is 504 GB/s, and the earlier profiles used 756 GB/s. Neither is 1327. So
+the "floor" computed from the specification was wrong, and with it the
+conclusion that the matmuls run at a quarter of peak.
+
+What is really happening: the 25 MB projections are large enough that the
+transfer pipelines and overlaps the launch, so they exceed the nominal
+figure. The 4.2 MB ones are dominated by launch and ramp-up instead.
+
+**So the matmuls are not the bottleneck in bandwidth terms — they are at or
+above the measured floor.** The cost is the *number of operations*: about
+144 kernels per layer for a layer that needs seven matmuls and two norms,
+each taking 13 to 22 µs of work. At those sizes the launch cost is
+comparable to the work itself.
+
+`scripts/check_bandwidth.py` measures the achievable bandwidth with a plain
+copy at nine sizes, so the floor comes from a measured number rather than a
+specification.
+
+**This is the third hypothesis ruled out by measurement, and the second one
+I got wrong by reasoning from the specification.** The lesson is the same
+one as the grader: *the instrument, not the subject, is usually the thing
+that is wrong.* A floor computed from a datasheet number is not a
+measurement.
+
+**And it does not change the conclusion, which was already right:** the
+cost is the kernel count, the fix is fewer kernels, and both obvious
+fixes are unavailable on Windows. The EOS fix is still worth ten times
+more than any of this.

@@ -84,16 +84,19 @@ def main() -> int:
                       ("up_proj", layer.mlp.up_proj),
                       ("down_proj", layer.mlp.down_proj)):
         w = mod.weight
+        # each projection has its own input width: the attention ones take
+        # the hidden size, down_proj takes the expanded intermediate size
+        in_features = w.shape[1]
+        xi = torch.randn(bs, in_features, device=dev, dtype=model.dtype)
         # the weight is stored (out_features, in_features); the matmul is
         # x @ w.T, and torch.nn.functional.linear does the same thing
-        w_t = w.T
-        t = bench(lambda: torch.nn.functional.linear(x, w))
+        t = bench(lambda: torch.nn.functional.linear(xi, w))
         mb = w.numel() * 2 / 1e6
         # the floor: bytes / bandwidth, in milliseconds
         floor = (mb * 1e6) / (BW / 1e9) / 1e6
         total_ms += t
         total_floor += floor
-        shape = f"({bs}x{w.shape[1]})@({w.shape[1]}x{w.shape[0]})"
+        shape = f"({bs}x{in_features})@({in_features}x{w.shape[0]})"
         gbs = (mb * 1e6) / (t / 1000) / 1e9
         print(f"  {name:<14} {shape:<24} {t:7.4f} {mb:7.1f} "
               f"{gbs:7.0f} {floor:8.4f} {t/floor:7.1f}x")
