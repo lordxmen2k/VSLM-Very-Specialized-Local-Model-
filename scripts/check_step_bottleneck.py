@@ -180,8 +180,25 @@ def main() -> int:
         nkv = getattr(cfg, "num_key_value_heads", nh)
         hd = getattr(cfg, "head_dim", cfg.hidden_size // nh)
         print(f"  {nh} query heads, {nkv} kv heads, head dim {hd}")
-        n_ctx = past[0][0].shape[2] if hasattr(past, "__getitem__") else 0
+
+        # the kv cache length: modern Cache objects expose layers, older
+        # ones index as a tuple. Take the longest sequence in the cache
+        # so the comparison is at a realistic context length.
+        n_ctx = 0
+        try:
+            for layer in past.layers:
+                for t in (layer.keys, layer.values):
+                    if t is not None:
+                        n_ctx = max(n_ctx, t.shape[2])
+        except AttributeError:
+            try:
+                n_ctx = past[0][0].shape[2]
+            except Exception:
+                n_ctx = 0
+        if n_ctx <= 0:
+            n_ctx = 1
         print(f"  kv cache length: {n_ctx}")
+
         q = torch.randn(bs, nh, 1, hd, device=dev, dtype=model.dtype)
         k = torch.randn(bs, nkv, n_ctx, hd, device=dev, dtype=model.dtype)
         v = torch.randn(bs, nkv, n_ctx, hd, device=dev, dtype=model.dtype)
@@ -195,14 +212,26 @@ def main() -> int:
             return F.scaled_dot_product_attention(q, kk, vv, attn_mask=mask)
 
         def gqa_pack():
-            # the transformers decode path: reshape, not copy
-            b, _, sq, hd_ = q.shape
-            kk = k.view(b, nkv, nh // nkv * sq, hd_)
-            vv = v.view(b, nkv, nh // nkv * sq, hd_)
+            # the transformers decode path: reshape, not copy.
+            # (b, nkv, ctx, hd) -> (b, nkv, groups*1, hd) is not a
+            # valid view, so the pack is over the query axis instead:
+            # the group becomes the position axis and the query is the
+            # sequence axis.
+            groups = nh // nkv
+            kk = k.view(b, nkv, groups, n_ctx, hd).transpose(2, 3)
+            vv = v.view(b, nkv, groups, n_ctx, hd).transpose(2, 3)
+            kk = kk.reshape(b, nkv * groups, n_ctx, hd)
+            vv = vv.reshape(b, nkv * groups, n_ctx, hd)
             return F.scaled_dot_product_attention(q, kk, vv, attn_mask=mask)
 
+        def gqa_native():
+            # the enable_gqa path torch supports natively
+            return F.scaled_dot_product_attention(q, k, v, attn_mask=mask,
+                                                 enable_gqa=True)
+
         for name, fn in (("expand (repeat_kv)", gqa_expand),
-                         ("pack (transformers decode path)", gqa_pack)):
+                         ("pack (transformers decode path)", gqa_pack),
+                         ("native enable_gqa", gqa_native)):
             for _ in range(10):
                 fn()
             torch.cuda.synchronize()
@@ -221,6 +250,45 @@ def main() -> int:
         print(f"  could not run the attention comparison: {exc}")
     print()
 
+    # --- 5. what does a single launch cost? ------------------------------
+    print("=== what does a single kernel launch cost on this CPU? ===")
+    print("  4020 launches in 34.4 ms is 8.6 us each, which is high - a")
+    print("  CUDA launch is normally 3-5 us. This measures the launch cost")
+    print("  on its own, with a trivial kernel, so the per-launch figure")
+    print("  can be compared against the 8.6 us the step implies.")
+    print()
+    small = torch.randn(64, 64, device=dev, dtype=torch.bfloat16)
+    one = lambda: small.add_(1.0)                 # noqa: E731
+    for _ in range(20):
+        one()
+    torch.cuda.synchronize()
+    t0 = time.perf_counter()
+    for _ in range(200):
+        one()
+    t_issue = (time.perf_counter() - t0) / 200 * 1e6
+    torch.cuda.synchronize()
+    t0 = time.perf_counter()
+    for _ in range(200):
+        one()
+        torch.cuda.synchronize()
+    t_sync = (time.perf_counter() - t0) / 200 * 1e6
+    print(f"  issue only  {t_issue:6.2f} us per launch")
+    print(f"  with sync   {t_sync:6.2f} us per launch")
+    print()
+    print("  the 'issue only' number is the pure CPU cost of handing one")
+    print("  kernel to the driver, with the GPU work overlapping.")
+    print()
+    if t_issue > 6.0:
+        print(f"  {t_issue:.1f} us per launch is SLOW. This CPU is expensive")
+        print("  at issuing kernels, so the launch count is what matters:")
+        print("  every launch costs the same whether it does much or")
+        print("  little. Halving the launches halves the step.")
+    else:
+        print(f"  {t_issue:.1f} us per launch is normal, so the cost is not")
+        print("  the per-launch overhead but the NUMBER of launches -")
+        print("  4020 of them. Each one adds its full cost to the step.")
+    print()
+
     print("=== the summary ===")
     print()
     print("  The step is 32.7 ms of real work - wall, events and sync all")
@@ -232,6 +300,11 @@ def main() -> int:
     print("  If the CPU issue path alone accounts for most of the 32.7 ms,")
     print("  the fix is fewer kernel launches. If the issue path is short,")
     print("  the fix is to stop reading the weights twice.")
+    print()
+    print("  The fix for the launch count is torch.compile - which needs")
+    print("  triton, and triton has no official Windows wheel - or")
+    print("  xformers, which is available on Windows but not used by")
+    print("  transformers for Qwen3 by default.")
     return 0
 
 

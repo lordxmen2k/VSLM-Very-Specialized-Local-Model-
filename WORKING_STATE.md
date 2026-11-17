@@ -519,3 +519,63 @@ different fixes:**
 
 `scripts/check_step_bottleneck.py` measures the issue path against the
 drain path, so the two are separated instead of guessed at.
+
+### The CPU is the bottleneck - and the earlier retraction was wrong
+
+The issue path measured directly, with the GPU work deliberately not
+drained:
+
+| trial | issue | drain | total |
+|---|---|---|---|
+| 0 | 34.42 ms | 1.33 ms | 34.92 ms |
+| 1 | 33.58 ms | 1.60 ms | 34.88 ms |
+| 2 | 34.55 ms | 1.53 ms | 34.52 ms |
+
+**The CPU spends 34.4 ms issuing the step; the GPU then needs 1.3 ms to
+finish what was queued. The GPU is idle 98.6% of the step.**
+
+This contradicts the earlier retraction. The two-clock reading - "CPU-issue
+~31 ms and GPU-execute ~31 ms, so both are busy" - was wrong for a
+specific reason: **the GPU-execute number was taken with CUDA events
+around the whole step, so it recorded when the LAST kernel finished.
+That is bounded below by the issue path, because the last kernel cannot
+start until the CPU has issued it.** So "GPU execute ~= wall" says the
+last kernel finished at the end of the step, and nothing about whether the
+GPU was busy during it. The drain measurement is the only number that
+separates the two cases, and it was missing from every earlier script.
+
+**The corrected rule, replacing the one recorded two sections above:**
+
+| drain | meaning |
+|---|---|
+| ~0 | the GPU is starved - **CPU-bound** |
+| ~total | the GPU is the bottleneck |
+| in between | both matter |
+
+Without the drain number, the two clocks are uninterpretable. Never
+conclude "the GPU is idle" or "the CPU is waiting" from two clocks
+that are both close to the wall time.
+
+### What the numbers say about the fix
+
+4020 launches in 34.4 ms is **8.6 us per launch**, matching the
+profiler's 8.1 us per kernel. The fix is fewer launches, and the
+available routes are `torch.compile` (needs triton - no official Windows
+wheel) or xformers (available, but transformers does not use it for
+Qwen3 by default).
+
+The LM head is 622.3 MB - 18% of the weights - and costs 1.44 ms, timed
+honestly. It is not a rounding error in the step.
+
+### The priority, in units
+
+| change | effect |
+|---|---|
+| EOS supervision (already implemented) | **10x** fewer decode steps |
+| every speed fix available on Windows | ~1.3-2x |
+
+At 34.4 ms a step, 2048 tokens is 70.5 s per sequence and 206 tokens is
+7.1 s. Across the 660-problem benchmark that is 12.9 hours against
+78 minutes. **The platform walls cap the speedup at 1.3-2x; the EOS fix
+is worth 10x. They are not comparable, and the EOS fix is already
+implemented.**
