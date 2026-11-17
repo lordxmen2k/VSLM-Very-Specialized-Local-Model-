@@ -457,3 +457,65 @@ If it can, the method is wrong.
 `scripts/check_projection_timing.py` measures everything three ways —
 wall clock, CUDA events, and synchronise-per-call — so the overlap is
 visible rather than hidden.
+
+### The step is real work - measured three ways
+
+`scripts/check_projection_timing.py` measures the same thing three ways:
+wall clock around the loop, CUDA events around the loop, and a
+synchronize-per-call. The copies and the projections disagree by up to
+2x between wall and sync (the launch overlap), but the **decode step
+does not**:
+
+| measurement | step |
+|---|---|
+| wall clock | 32.45 ms |
+| CUDA events | 31.87 ms |
+| sync per call | 33.85 ms |
+
+All three agree within 6%. **So the 32.7 ms step is real work plus real
+launch cost, not an issue-rate artefact.** The earlier projection
+numbers were the issue rate; the step never was, because it has enough
+work to fill the pipe.
+
+### The card's real bandwidth: ~200 GB/s, not 1327
+
+| copy size | wall ms | events ms | sync ms | wall GB/s | sync GB/s |
+|---|---|---|---|---|---|
+| 4 MB | 0.0149 | 0.0133 | 0.0153 | 269 | 262 |
+| 16 MB | 0.0174 | 0.0171 | 0.0248 | 918 | 644 |
+| 32 MB | 0.1545 | 0.1484 | 0.1483 | 207 | 216 |
+| 64 MB | 0.3180 | 0.3400 | 0.3170 | 201 | 202 |
+| 256 MB | 1.3196 | 1.2661 | 1.2732 | 194 | 201 |
+
+The 16 MB row is the launch overlap, not an achievable bandwidth. From
+32 MB upward the copy sustains **~200-216 GB/s** by both methods, which
+is half the card's 504 GB/s specification - exactly what a copy (which
+reads *and* writes) should reach. **The earlier "1327 GB/s" reading was
+an artefact of the timing method and is retracted.**
+
+### The arithmetic that closes the diagnosis
+
+| quantity | value |
+|---|---|
+| weights | 3.44 GB |
+| one read at 200 GB/s | 17.2 ms |
+| the measured step | 32.7 ms |
+| ratio | **1.9x** |
+
+The projections, timed honestly, cost 0.259 ms per layer for 100.8 MB,
+which is *below* the 0.504 ms floor at 200 GB/s - so some of the weights
+are served from cache, and the projections are not the problem.
+
+**Two candidate explanations for the missing ~15 ms, and they need
+different fixes:**
+
+* **(a) the weights are read more than once** - 32.7 / 17.2 = 1.9x is
+  suspiciously close to 2x. The fix is to find and remove the second
+  read.
+* **(b) launch overhead on top of a bandwidth-bound read** - 4020
+  kernels x ~8 us is ~32 ms of CPU-side cost. If the CPU takes ~32 ms
+  to *issue* the step, the CPU is the bottleneck and the fix is fewer
+  launches or a faster CPU.
+
+`scripts/check_step_bottleneck.py` measures the issue path against the
+drain path, so the two are separated instead of guessed at.
