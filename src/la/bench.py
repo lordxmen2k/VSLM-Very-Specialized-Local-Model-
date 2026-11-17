@@ -272,6 +272,89 @@ def measure_perf(tok, model, prompts: list[str], batch_sizes=(1, 4, 8),
     return out
 
 
+def _same_checkpoint(a: str, b: str) -> bool:
+    """Whether two checkpoint names refer to the same weights.
+
+    Compared on the final path component, so a local path and a hub id for
+    the same release are treated as equal, and "-Base" is NOT the same as
+    the instruct release.
+
+    A hub cache path looks like
+        .../hub/models--Qwen--Qwen3-1.7B/snapshots/<commit>
+    whose last component is a commit hash, so the model name is taken from
+    the `models--ORG--NAME` directory when one is present.
+    """
+    def tail(name: str) -> str:
+        parts = str(name).rstrip("/").split("/")
+        for p in parts:
+            if p.startswith("models--"):
+                # models--Qwen--Qwen3-1.7B -> Qwen3-1.7B
+                return p[len("models--"):].split("--")[-1]
+        return parts[-1]
+    return tail(a) == tail(b)
+
+
+def _check_adapter_base(base: str, adapter: str) -> None:
+    """Stop if the adapter was trained on a different base model.
+
+    A LoRA adapter is a difference between two models. Applied to the
+    wrong weights it produces a model that is neither one, and the result
+    is silently incoherent rather than an error.
+
+    The adapter records its base in adapter_config.json (as
+    base_model_name_or_path) and in train_args.json (as base). Either one
+    is enough; the check is skipped when neither is present, because an
+    adapter from an older run may not have been written by this code.
+    """
+    if not adapter or not os.path.isdir(adapter):
+        return
+
+    trained_on = None
+    source = None
+
+    cfg_path = os.path.join(adapter, "adapter_config.json")
+    if os.path.exists(cfg_path):
+        try:
+            with open(cfg_path, encoding="utf-8") as fh:
+                cfg = json.load(fh)
+            trained_on = cfg.get("base_model_name_or_path")
+            source = "adapter_config.json"
+        except Exception:
+            trained_on = None
+
+    args_path = os.path.join(adapter, "train_args.json")
+    if trained_on is None and os.path.exists(args_path):
+        try:
+            with open(args_path, encoding="utf-8") as fh:
+                targs = json.load(fh)
+            trained_on = targs.get("base")
+            source = "train_args.json"
+        except Exception:
+            trained_on = None
+
+    if not trained_on:
+        return
+
+    if _same_checkpoint(base, trained_on):
+        return
+
+    raise SystemExit(
+        f"\nREFUSING TO RUN: the adapter was trained on a different base model.\n"
+        f"\n"
+        f"  the adapter records : {trained_on}   (from {source})\n"
+        f"  the benchmark asks  : {base}\n"
+        f"\n"
+        f"A LoRA adapter is a difference between two models. Applied to the\n"
+        f"wrong weights it gives a model that is neither one, and the result\n"
+        f"is silently incoherent rather than an error.\n"
+        f"\n"
+        f"Use the base the adapter was trained on:\n"
+        f"  python -m la.bench --base {trained_on} --adapter {adapter} ...\n"
+        f"\n"
+        f"or train the adapter against {base} instead.\n"
+    )
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="Benchmark against published results")
     ap.add_argument("--base", default="Qwen/Qwen3-1.7B")
@@ -289,6 +372,20 @@ def main(argv=None) -> int:
     ap.add_argument("--temperature", type=float, default=0.0)
     ap.add_argument("--out", default="")
     args = ap.parse_args(argv)
+
+    # Refuse to score an adapter against a base it was not trained on.
+    #
+    # The LoRA delta is a difference between two models, so it only means
+    # anything on the weights it was learned against. Run 5 was trained on
+    # Qwen/Qwen3-1.7B (the instruct checkpoint) and the Makefile scored it
+    # against Qwen/Qwen3-1.7B-Base, because the two names were hardcoded in
+    # different places. The merged model was incoherent, it never emitted
+    # its stop token, and every problem ran to the 2048-token cap: about
+    # 35 minutes for a batch of 8, 48 hours for the benchmark.
+    #
+    # The adapter records the base it was trained on, in adapter_config.json
+    # and train_args.json. If the requested base disagrees, stop.
+    _check_adapter_base(args.base, args.adapter)
 
     if args.benchmark == "linalg":
         problems = fetch_linalg()

@@ -830,3 +830,71 @@ score incomparable with the published baseline.
 (440 / 220 / 126) so a change to the benchmark data or the prompt
 construction shows up as a test failure rather than as a silent
 regression.
+
+### Run 5's benchmark was scoring the WRONG BASE MODEL
+
+**The bug:** two hardcoded copies of the base model name.
+
+| source | base model |
+|---|---|
+| `configs/default.yaml` | `Qwen/Qwen3-1.7B` (the instruct checkpoint) |
+| `Makefile` `BASE ?=` | `Qwen/Qwen3-1.7B-Base` |
+
+Run 5 was trained with `--base Qwen/Qwen3-1.7B`, and then `make bench-all`
+used the Makefile's default, so the benchmark ran:
+
+```
+python -m la.bench --base Qwen/Qwen3-1.7B-Base --adapter runs/vslm
+```
+
+**A LoRA adapter is a difference between two models.** The delta was
+learned against the instruct weights and was merged into the BASE weights,
+producing a model that is neither one.
+
+**The symptom:** ~35 minutes per batch of 8. The benchmark was at
+batch 6/83 after 156 minutes - about **48 hours** for the full 660.
+
+**Why it was that slow:** the merged model was incoherent, so it never
+emitted its stop token. Every problem ran to the 2048-token cap. (The
+tokenizer still came from the adapter directory, so `eos_token_id` was
+correctly 151645 = `<|im_end|>` - the wiring was right, the weights were
+wrong.)
+
+Note the timing arithmetic that gives it away: 2048 steps at the measured
+34 ms is 70 seconds, not 35 minutes. A 30x discrepancy means something
+other than the expected path was running.
+
+**The fix, in two parts:**
+
+1. **The Makefile reads the base from the config**, so there is exactly one
+   place that names it:
+
+   ```make
+   BASE ?= $(shell $(PYTHON) -c "import yaml,sys; print(yaml.safe_load(open('configs/default.yaml'))['model']['base'])" 2>/dev/null || echo Qwen/Qwen3-1.7B)
+   ```
+
+2. **The benchmark refuses to score an adapter against a different base.**
+   `_check_adapter_base()` reads `adapter_config.json` and
+   `train_args.json` from the adapter directory, and exits with a clear
+   message if the requested base disagrees. A silent incoherence becomes a
+   refusal.
+
+**The general lesson: one source of truth for a value that must agree
+across two places.** The config already existed and was already correct;
+the Makefile simply did not read it, and it won because a command-line
+default overrides what the program would have chosen.
+
+### What run 5 needs to do
+
+```bash
+# stop the current run - it is scoring the wrong model
+# then:
+git pull
+python -m la.bench --base Qwen/Qwen3-1.7B --adapter runs/vslm \
+    --benchmark linalg --baseline --perf --out data/bench_linalg.jsonl
+```
+
+`make bench-all` now resolves `--base Qwen/Qwen3-1.7B` and does the same
+thing. `scripts/check_bench_run.py` runs a handful of problems and prints
+whether each one stopped or hit the cap, so the fix can be confirmed in
+two minutes rather than in 48 hours.

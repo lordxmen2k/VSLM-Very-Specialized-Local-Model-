@@ -19,7 +19,19 @@ N_TRAIN ?= 20000
 N_TEST ?= 200
 SEED ?= 7
 WORKERS ?= 4
-BASE ?= Qwen/Qwen3-1.7B-Base
+
+# The base model comes from configs/default.yaml, so there is exactly ONE
+# place that names it.
+#
+# It used to be hardcoded here as Qwen/Qwen3-1.7B-Base, while the config
+# said Qwen/Qwen3-1.7B - the instruct checkpoint. The Makefile's value won,
+# so `make bench-all` scored an adapter that had been trained against the
+# instruct weights on top of the BASE weights. The model was incoherent, it
+# never emitted its stop token, and every problem ran to the 2048-token cap:
+# about 35 minutes for a batch of 8, and 48 hours for the benchmark.
+#
+# Read the config, so the two can never disagree again.
+BASE ?= $(shell $(PYTHON) -c "import yaml,sys; print(yaml.safe_load(open('configs/default.yaml'))['model']['base'])" 2>/dev/null || echo Qwen/Qwen3-1.7B)
 ADAPTER ?= runs/vslm
 DATA ?= data
 RESULTS ?= data/results.jsonl
