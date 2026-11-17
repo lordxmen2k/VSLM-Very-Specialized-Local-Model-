@@ -898,3 +898,175 @@ python -m la.bench --base Qwen/Qwen3-1.7B --adapter runs/vslm \
 thing. `scripts/check_bench_run.py` runs a handful of problems and prints
 whether each one stopped or hit the cap, so the fix can be confirmed in
 two minutes rather than in 48 hours.
+
+## RUN 5 RESULT — the benchmark ran correctly, and exposed three corpus bugs
+
+The wrong-base fix worked. Run 5's benchmark completed in **35.9 minutes**
+for the adapter pass and **95.3 minutes** for the base pass, against a
+projected 48 hours for the broken run. Every adapter completion stopped
+on EOS.
+
+### The scores
+
+| size | n | fine-tuned | base | delta |
+|---|---|---|---|---|
+| 3x3 | 220 | 52.7% | 75.0% | **-22.3 points** |
+| 4x4 | 220 | 43.6% | 41.8% | +1.8 points |
+| 5x5 | 220 | 28.6% | 22.3% | +6.4 points |
+| overall | 660 | **41.7%** | 46.4% | -4.7 points |
+
+The fine-tuned model is **worse than its own base model**. That is not a
+speed problem, a stop-token problem, or a prompt-format problem any more.
+It is a **corpus/benchmark contract mismatch**, and it is diagnosable from
+the by-task breakdown:
+
+```
+  by task:              fine-tuned    base
+    determinant              1/150  (  0.7%)   54/150  ( 36.0%)
+    eigenvalue               1/90   (  1.1%)    2/90   (  2.2%)
+    matrix_power            43/60   ( 71.7%)   34/60   ( 56.7%)
+    matrix_vector           45/60   ( 75.0%)   44/60   ( 73.3%)
+    multiplication          33/60   ( 55.0%)   25/60   ( 41.7%)
+    nullity                 15/60   ( 25.0%)   19/60   ( 31.7%)
+    rank                    21/60   ( 35.0%)   21/60   ( 35.0%)
+    trace                   56/60   ( 93.3%)   58/60   ( 96.7%)
+    transpose               60/60   (100.0%)   49/60   ( 81.7%)
+```
+
+Two families are catastrophic: **determinant 0.7%** and **eigenvalue
+1.1%**. Everything else is healthy or better than base. Three verified
+causes, each reproduced against the real grader:
+
+### Cause 1 — rank and nullity are taught as a PAIR, asked as SCALARS
+
+The corpus has one family, `rank_nullspace`, whose answer is literally
+`rank = 2, nullity = 1`. The benchmark asks for rank **or** nullity and
+grades against the scalar `2` or `1`.
+
+The model, asked for the rank alone, answers `rank = 2, nullity = 1`. The
+grader reads the **last** number out of that string, so it sees the
+nullity and never the rank:
+
+```
+model output : the answer is rank = 2, nullity = 1
+parsed       : 1          <- the nullity, not the rank
+vs reference '2'  -> equal=False   (wrong, every time)
+vs reference '1'  -> equal=True    (right by accident)
+```
+
+**The model has the right number and the wrong answer shape.** The corpus
+never showed it that these are two different questions. Asked for the
+rank, it is wrong *every single time* - the number it wanted to give is
+sitting in the middle of the string where the grader cannot see it.
+
+This is also why nullity (25.0%) scores better than rank (35.0% would be
+expected if both were equally broken). It is not; the nullity number is
+simply the one that survives the extraction.
+
+### Cause 2 — the corpus teaches EXACT eigenvalues, the benchmark asks for DECIMALS
+
+The corpus's eigenvalue generator picks eigenvalues and builds a matrix
+with exactly those eigenvalues, so the trained answer is always exact:
+`\{ 2, 5, 1 \}`, or `\{ 3 - 2*I, 3 + 2*I \}`. The benchmark's eigenvalues
+are roots of a characteristic polynomial and are irrational —
+`-10.9074, 4.5753, 6.3321`.
+
+Measured over 90 generated corpus eigenvalues: **every one is an exact
+number** — 86 integers and 4 exact complex pairs, and not one irrational.
+The corpus never shows the model a value it has to round, and the
+benchmark's 90 eigenvalue questions all require one.
+
+Two sub-failures, both verified:
+
+- The answer *content* differs. The model has learned to emit exact
+  values. Asked for the eigenvalues of a matrix whose eigenvalues are
+  irrational, it produces integers — and is wrong. This is the one that
+  costs the points.
+- The answer *format* differs, but less severely than it first looked.
+  `\{2, 5, 1\}` parses to a list, so the shape survives; the benchmark's
+  reference normalises to a bare list `-10.9074, 4.5753, 6.3321`. A
+  correct answer written in the corpus's set-brace style *does* score
+  correct (verified against the real grader), so the format is not what
+  is losing the points.
+
+Note the base model is also near zero here (2.2%), so this is a hard
+task for a 1.7B model, not only a corpus problem. But the corpus does
+not help at all here, where it helps on trace and transpose.
+
+A second, smaller mismatch in the same family: the corpus calls this
+family `eigenvalues` and the benchmark calls it `eigenvalue`, and the two
+names reach different closing instructions - the benchmark asks for "your
+final answers" (plural), the corpus's fallback asks for a "final numerical
+answer" (singular). Cosmetic next to the exact-versus-decimal content
+problem, but the same root cause: two names for one family and nobody
+reconciled them.
+
+### Cause 3 — the determinant's algorithm choice does not match the corpus's, at 3x3
+
+The corpus teaches cofactor expansion for 3x3 and elimination for 4x4 and
+5x5. The benchmark's 3x3 determinants are graded against the same scalar
+format the corpus teaches, so the format is fine — but the model scores
+0.7% overall and the base scores 36%. The corpus's 3x3 cofactor expansion
+is a long, sign-sensitive derivation; the benchmark's own error taxonomy
+says models fail by losing the cofactor sign. The corpus's 3x3 path is
+precisely the failure mode the benchmark documents.
+
+Meanwhile the base model, which does not use the corpus's method, scores
+36% on determinants — because it can compute a 3x3 determinant by
+elimination or by a more direct route.
+
+### What this means
+
+The fine-tune is **not yet a net win**. It beats base on 4x4 (+1.8) and
+5x5 (+6.4) — the sizes that matter most for the benchmark's difficulty
+curve — and loses badly on 3x3, which is the easiest size. That inversion
+is the signature of a corpus that has taught the wrong *shape* of answer
+on the easy problems while helping on the hard ones.
+
+This is the same class of bug as the first run's prompt mismatch, one
+layer down: the prompt now matches, but the **answer contract** does not.
+The benchmark asks one question and the corpus answers a different one.
+
+### The fixes, in priority order
+
+1. **Split `rank_nullspace` into `rank` and `nullity` families**, each
+   with a scalar answer. The benchmark asks them separately, so the
+   corpus must teach them separately. (Cheapest fix, biggest win: rank
+   35% + nullity 25% of 120 problems.)
+2. **Add an eigenvalue family whose answers are irrational decimals**,
+   matching the benchmark's reference format, and teach the bare-list
+   answer shape rather than a set literal.
+3. **Teach a second determinant path for 3x3** (elimination alongside
+   cofactor expansion), so the model is not locked into the method the
+   benchmark says models fail at.
+
+### The rule this adds
+
+**A benchmark's by-task breakdown is a map of the contract, not just a
+score.** When a fine-tune loses to its base model, look at the per-task
+table first: the tasks where it wins and the tasks where it collapses are
+usually not random. `determinant 0.7%` and `eigenvalue 1.1%` next to
+`transpose 100%` is not a capability gradient — it is a formatting
+contract that was never taught.
+
+### The other measurement: the base model's answers are mostly unreadable
+
+```
+  base model, no adapter
+  3x3   76.4%   (boxed only: 75.0%)
+  4x4   45.9%   (boxed only: 41.8%)
+  5x5   23.2%   (boxed only: 22.3%)
+  no answer parsed: 128
+```
+
+The base model **knows more than it scores**. Read from anywhere in the
+response it gets 76.4% of 3x3; scored strictly on `\boxed{}` it gets
+75.0%. It also fails to stop: 128 of 660 answers never produced a parseable
+value, and the base pass took 95.3 minutes against the adapter's 35.9 —
+2.7x slower, because it runs to the cap.
+
+So the comparison has to be stated carefully. Against the *benchmark's own
+protocol*, base scores 46.4% and the fine-tune scores 41.7%. Against a
+lenient read of the base model's prose, base scores ~50%. The fine-tune
+does not lose on mathematics; it loses on **answer shape**, in exactly the
+two families where the corpus teaches the wrong shape.
