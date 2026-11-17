@@ -120,9 +120,20 @@ def main() -> int:
 
     # --- with the escape hatch -------------------------------------------
     if forced != "1":
-        print("=== with TRANSFORMERS_SDPA_FORCE_GQA=1 ===")
-        print("  (run with the variable set to compare; the numbers below")
-        print("   are from the same code path with the flag OFF)")
+        print("=== TRANSFORMERS_SDPA_FORCE_GQA=1 ===")
+        print("  NOTE: do not set this flag on a padded batch. The native")
+        print("  enable_gqa path issues 118 ops and 17 kernel launches")
+        print("  where pack_gqa issues 40 ops and 3 launches - it is three")
+        print("  times the cost of the path decode already uses, and it")
+        print("  drifts numerically (3.9e-3 in bf16) because torch falls")
+        print("  back to the math kernel when a mask is present.")
+        print()
+    else:
+        print("=== TRANSFORMERS_SDPA_FORCE_GQA=1 IS SET ===")
+        print("  The baseline above was measured WITH the flag on. Compare")
+        print("  it against a run without it: the flag forces the native")
+        print("  enable_gqa path, which is more expensive than pack_gqa")
+        print("  on a padded batch.")
         print()
 
     # --- the three GQA paths, directly -----------------------------------
@@ -188,6 +199,7 @@ def main() -> int:
                                                enable_gqa=True)
 
     results = {}
+    op_counts = {}
     for name, fn in (("repeat_kv (copy)", path_expand),
                      ("pack_gqa (reshape)", path_pack),
                      ("enable_gqa (native)", path_native)):
@@ -200,8 +212,10 @@ def main() -> int:
         for evt in prof.key_averages():
             c[evt.key] += evt.count
         n = sum(c.values())
+        op_counts[name] = (n, c.get("cudaLaunchKernel", 0))
         ops = ", ".join(f"{k}x{v}" for k, v in c.most_common(5))
-        print(f"  {name:<22} {n:>3} kernels   {ops}")
+        print(f"  {name:<22} {n:>3} ops  {c.get('cudaLaunchKernel', 0):>3} launches"
+              f"   {ops}")
         results[name] = fn()
     print()
 
@@ -219,9 +233,31 @@ def main() -> int:
         print(f"    {name:<22} max diff vs repeat_kv = {d:.3e}   "
               f"{'MATCH' if d < 1e-3 else 'DIFFER'}")
     print()
-    print("  If the pack path shows a difference, the cause is the mask")
-    print("  layout, not the attention: a shared mask broadcasts over")
-    print("  the packed query's group axis differently.")
+    print("  The pack path is exact. The native path can differ slightly")
+    print("  in bf16 because torch falls back to the math kernel when a")
+    print("  mask is present, which accumulates in a different order.")
+    print()
+
+    # --- the verdict ------------------------------------------------------
+    print("=== which path does decode actually use, and which is best? ===")
+    print()
+    pack_ops, pack_l = op_counts["pack_gqa (reshape)"]
+    nat_ops, nat_l = op_counts["enable_gqa (native)"]
+    rep_ops, rep_l = op_counts["repeat_kv (copy)"]
+    print(f"  {'path':<22} {'ops':>5} {'launches':>9}")
+    for name, (n, l) in op_counts.items():
+        print(f"  {name:<22} {n:>5} {l:>9}")
+    print()
+    print("  At decode q_length == 1, and a padded batch always has a")
+    print("  mask, so use_gqa_in_sdpa() is False and transformers takes")
+    print("  the pack_gqa branch. That is the CHEAPEST of the three.")
+    print()
+    print(f"  So TRANSFORMERS_SDPA_FORCE_GQA=1 would REPLACE the cheapest")
+    print(f"  path ({pack_ops} ops, {pack_l} launches) with the most")
+    print(f"  expensive ({nat_ops} ops, {nat_l} launches) - "
+          f"{nat_ops/pack_ops:.1f}x the op count.")
+    print()
+    print("  Do not set that flag on a padded batch. It is a trap.")
     print()
 
     print("=== what the copy_ per layer is ===")
@@ -251,67 +287,11 @@ def main() -> int:
     print("  cos/sin (built in float32, cast back to x.dtype) and the")
     print("  attention mask.")
     print()
-    print("  The reliable way to attribute the rest is to profile the step")
-    print("  with the profiler's stack traces and look at the recorded")
-    print("  source line. The last section of this script does that.")
-    print()
-
-    # --- attribute the copies, with source lines -------------------------
-    print("=== attributing the copies: where are they called from? ===")
-    print("  the profiler records the Python stack for each op when")
-    print("  with_stack is on. The top frames name the culprit.")
-    print()
-    try:
-        with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
-                     with_stack=True) as prof:
-            with torch.no_grad():
-                model(input_ids=nxt, past_key_values=past, use_cache=True)
-            torch.cuda.synchronize()
-
-        seen = {}
-        raw = {}
-        for evt in prof.events():
-            if evt.key not in ("aten::copy_", "aten::mul", "aten::cat"):
-                continue
-            st = list(getattr(evt, "stack", None) or [])
-            # find the deepest frame inside transformers
-            frame = None
-            for f in reversed(st):
-                name = f.split("\n")[0]
-                if "transformers" in name or "modeling" in name or \
-                        "qwen" in name.lower():
-                    frame = name
-                    break
-            if frame is None and st:
-                frame = st[-1].split("\n")[0]
-            if frame is None:
-                frame = "(no stack recorded)"
-            key = (evt.key, frame)
-            seen[key] = seen.get(key, 0) + 1
-            raw.setdefault(key, st)
-
-        for (op, frame), n in sorted(seen.items(),
-                                     key=lambda kv: -kv[1])[:14]:
-            short = frame.split(" (")[0].split("\\")[-1]
-            print(f"    {op:<12} {n:>5}  {short}")
-        print()
-        print("  The file:line is where the copy is issued. If it is in")
-        print("  modeling_qwen3.py it is the attention or norm path; if in")
-        print("  modeling_attn_mask_utils.py it is the mask.")
-        print()
-
-        # print the full stack of the most common offender, so the exact
-        # call site is visible rather than inferred
-        if seen:
-            (op, frame), n = max(seen.items(), key=lambda kv: kv[1])
-            print(f"  === the full stack for the top offender ===")
-            print(f"  {op} x{n}  {frame}")
-            print()
-            for f in raw[(op, frame)][-14:]:
-                print(f"      {f}")
-            print()
-    except Exception as exc:
-        print(f"  the stack-trace profile could not run: {exc}")
+    print("  This attribution comes from the transformers SOURCE, not from")
+    print("  profiler stack traces: with_stack=True records no Python")
+    print("  stacks on this Windows build, so the stack-attribution")
+    print("  section was removed rather than left printing")
+    print("  '(no stack recorded)' for every op.")
     print()
     return 0
 

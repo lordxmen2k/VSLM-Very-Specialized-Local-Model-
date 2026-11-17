@@ -731,3 +731,49 @@ The realistic Windows-available gain is therefore ~1.2-1.5x (xformers
 fuses the attention path only, not the norms), not the 2.4x that the
 "halve the launch count" estimate suggested. Against the EOS fix at 10x,
 that is not worth another round of work.
+
+### The escape hatch is a TRAP on a padded batch
+
+Measured on the GPU, the three GQA paths isolated:
+
+| path | ops | cudaLaunchKernel | max diff vs repeat_kv |
+|---|---|---|---|
+| `repeat_kv` (copies k/v) | 64 | 5 | - |
+| **`pack_gqa` (reshape q)** | **40** | **3** | **0** |
+| `enable_gqa` (native) | 118 | 17 | 3.906e-03 |
+
+**`enable_gqa` is the MOST expensive path, not the cheapest.** It issues
+17 kernel launches where `repeat_kv` issues 5 and `pack_gqa` issues 3.
+
+The reason: torch's flash and memory-efficient SDPA kernels do not
+support GQA, so `enable_gqa=True` **with an attention mask present**
+falls back to the math kernel, which materialises the expanded K/V and
+computes the full attention matrix.
+
+At decode (`q_length == 1`) with a **padded** batch, the mask is always
+present, so `use_gqa_in_sdpa()` returns False and transformers takes the
+`pack_gqa` branch - **which is already the cheapest path**. So:
+
+> **`TRANSFORMERS_SDPA_FORCE_GQA=1` would replace the cheapest path (40
+> ops, 3 launches) with the most expensive (118 ops, 17 launches) - 3x
+> the op count - and introduce a 3.9e-3 numerical drift in bf16.**
+>
+> **Do not set it on a padded batch.** The escape hatch is a trap.
+
+This also explains the earlier finding that `MATH` was the fastest SDPA
+backend: with a mask, that is the backend that actually runs.
+
+### The numerical difference is precision, not semantics
+
+On CPU, `enable_gqa` matched `repeat_kv` **exactly** in both float64 and
+float32. On GPU in bf16 it differs by 3.9e-3. So the maths is the same;
+the GPU's math kernel accumulates in a different order at bf16's ~3
+significant digits.
+
+### Profiler stack traces do not work on this build
+
+`with_stack=True` recorded **no Python stacks** - every op came back as
+"(no stack recorded)". The stack-attribution section has been removed
+rather than left printing nothing useful. The RMSNorm attribution came
+from the transformers **source**, which is stronger evidence anyway: it
+is the code, not a sample of it.
