@@ -117,6 +117,26 @@ BODY_HINTS = {
     "matrix_vector": "Show all intermediate steps. Put your final vector answer inside \\boxed{}.",
 }
 
+# The corpus family -> benchmark subcategory mapping.
+#
+# The corpus and the benchmark do not always use the same name for the same
+# family. One table is the only place that reconciles them, so the system
+# prompt and the closing instruction always come from the benchmark's own
+# tables. A family with no benchmark counterpart is absent and gets the
+# general prompt.
+FAMILY_TO_SUBCAT = {
+    "determinant": "determinant",
+    "eigenvalue": "eigenvalue",
+    "eigenvalue_numeric": "eigenvalue",
+    "rank": "rank",
+    "nullity": "nullity",
+    "matrix_trace": "trace",
+    "matrix_transpose": "transpose",
+    "matrix_multiply": "multiplication",
+    "matrix_power": "matrix_power",
+    "matrix_vector": "matrix_vector",
+}
+
 # The subcategory labels the benchmark uses in its CSVs.
 SUBCAT_ALIASES = {
     "det": "determinant",
@@ -227,9 +247,10 @@ def render_chat(tokenizer, system: str, user: str,
 
 
 def system_prompt_for(task: str) -> str:
-    """The benchmark's system prompt for a subcategory."""
+    """The benchmark's system prompt for a corpus family or subcategory."""
+    subcat = FAMILY_TO_SUBCAT.get(task, task)
     return SYSTEM_PROMPTS.get(
-        task, BASE_SYSTEM + "Always put your final numerical answer inside \\boxed{}.")
+        subcat, BASE_SYSTEM + "Always put your final numerical answer inside \\boxed{}.")
 
 
 def row_prompt(row: dict, tokenizer, thinking: bool = DEFAULT_THINKING) -> str:
@@ -254,7 +275,8 @@ def row_prompt(row: dict, tokenizer, thinking: bool = DEFAULT_THINKING) -> str:
 
 
 def body_hint(subcat: str) -> str:
-    """The closing instruction for a family."""
+    """The closing instruction for a corpus family or benchmark subcategory."""
+    subcat = FAMILY_TO_SUBCAT.get(subcat, subcat)
     return BODY_HINTS.get(normalise_subcat(subcat),
                           BODY_HINTS["determinant"])
 

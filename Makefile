@@ -47,7 +47,7 @@ DATA_ARGS ?=
 
 export PYTHONPATH := src
 
-.PHONY: help setup setup-gpu setup-light preflight data sample train eval bench bench-all chat test clean figures
+.PHONY: help setup setup-gpu setup-light preflight data sample train eval bench bench-all chat test clean figures contract-check
 
 help:
 	@echo "VSLM"
@@ -117,6 +117,11 @@ test:
 # check that every printed derivation evaluates to its own answer
 check-arithmetic:
 	$(PYTHON) -m la.check_arithmetic --n 200
+
+# print the corpus's answer contract, family by family, and fail on a
+# mismatch with the benchmark's own prompts or answer shapes
+contract-check:
+	$(PYTHON) scripts/check_corpus_contract.py --n 200
 
 # say what the model actually wrote for the questions it got wrong
 explain:

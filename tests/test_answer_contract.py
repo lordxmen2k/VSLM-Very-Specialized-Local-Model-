@@ -50,19 +50,15 @@ class TestRankNullityAreSeparateQuestions(unittest.TestCase):
     correctly rejects it.
     """
 
-    def test_corpus_teaches_a_combined_rank_nullity_answer(self):
-        """The bug, pinned: the corpus's only rank-ish answer is a pair."""
+    def test_corpus_teaches_separate_scalar_rank_and_nullity_answers(self):
+        """The fix, pinned: each question carries one scalar."""
         rng = random.Random(4242)
-        combined = None
-        for _ in range(50):
-            p = generate("rank_nullspace", rng)
-            if p is None:
-                continue
-            combined = p.answer
-            break
-        self.assertIsNotNone(combined, "no rank_nullspace problem generated")
-        self.assertIn("rank", combined)
-        self.assertIn("nullity", combined)
+        for family in ("rank", "nullity"):
+            p = generate(family, rng)
+            self.assertIsNotNone(p, f"no {family} problem generated")
+            self.assertNotIn("rank =", p.answer)
+            self.assertNotIn("nullity =", p.answer)
+            self.assertNotIn(",", p.answer)
 
     def test_combined_answer_scores_wrong_against_a_scalar_reference(self):
         """This is why the benchmark scored the model wrong.
@@ -138,42 +134,27 @@ class TestEigenvaluesMustBeDecimals(unittest.TestCase):
             any(not getattr(v, "is_integer", True) for v in parsed),
             f"expected decimal eigenvalues in {ref!r}")
 
-    def test_corpus_eigenvalues_are_always_exact(self):
-        """The bug, pinned: the corpus only ever teaches exact values.
-
-        Every corpus eigenvalue is an exact number - an integer, or an
-        exact complex like '3 - 2*I'. The benchmark's eigenvalues are
-        roots of a characteristic polynomial and are irrational. The
-        corpus never shows the model a value it has to round.
-        """
+    def test_corpus_eigenvalues_cover_both_value_domains(self):
+        """The fix, pinned: the corpus teaches exact and decimal values."""
         rng = random.Random(99)
         exact = 0
-        total = 0
-        complex_seen = 0
+        decimal = 0
         for _ in range(30):
-            p = generate("eigenvalues", rng)
-            if p is None:
-                continue
-            values = parse_answer(p.answer)
-            for v in values:
-                total += 1
-                if getattr(v, "is_integer", False):
-                    exact += 1
-                elif getattr(v, "is_number", False):
-                    complex_seen += 1
-        self.assertGreater(total, 0)
-        self.assertEqual(exact + complex_seen, total,
-                         "every corpus eigenvalue should be exact")
-        # and none of them is an irrational
-        for _ in range(30):
-            p = generate("eigenvalues", rng)
+            p = generate("eigenvalue", rng)
             if p is None:
                 continue
             for v in parse_answer(p.answer):
-                self.assertTrue(
-                    getattr(v, "is_Integer", None) is not None
-                    or not v.free_symbols,
-                    f"corpus eigenvalue {v} should be an exact number")
+                if getattr(v, "is_number", False):
+                    exact += 1
+        for _ in range(30):
+            p = generate("eigenvalue_numeric", rng)
+            if p is None:
+                continue
+            for v in parse_answer(p.answer):
+                if "." in str(v):
+                    decimal += 1
+        self.assertGreater(exact, 0, "no exact eigenvalues generated")
+        self.assertGreater(decimal, 0, "no decimal eigenvalues generated")
 
     def test_exact_integers_score_wrong_against_a_decimal_reference(self):
         """The content mismatch, which is the one that costs the points.
@@ -214,22 +195,23 @@ class TestDeterminantMethodIsNotTheOnlyOneTaught(unittest.TestCase):
                 parse_answer(ref), (list, dict),
                 f"determinant reference {ref!r} is not a scalar")
 
-    def test_corpus_teaches_only_one_method_for_3x3_determinants(self):
-        """The bug, pinned: there is no second path for 3x3."""
+    def test_corpus_teaches_both_methods_for_3x3_determinants(self):
+        """The fix, pinned: the 3x3 determinant has a second path."""
         rng = random.Random(7)
-        saw_3x3 = False
-        for _ in range(40):
+        methods = set()
+        for _ in range(80):
             p = generate("determinant", rng)
             if p is None:
                 continue
             m = re.search(r"of the (\d)x\1", p.question)
             if not m or m.group(1) != "3":
                 continue
-            saw_3x3 = True
-            # the 3x3 derivation is cofactor expansion, every time
-            self.assertIn("cofactor", p.scratchpad.lower())
-            break
-        self.assertTrue(saw_3x3, "no 3x3 determinant generated")
+            text = p.scratchpad.lower()
+            if "cofactor" in text:
+                methods.add("cofactor")
+            if "eliminate" in text:
+                methods.add("elimination")
+        self.assertEqual(methods, {"cofactor", "elimination"})
 
 
 class TestBenchmarkAndCorpusShareTheTaskVocabulary(unittest.TestCase):
@@ -242,27 +224,21 @@ class TestBenchmarkAndCorpusShareTheTaskVocabulary(unittest.TestCase):
     names, and a mismatch is invisible until the by-task table is read.
     """
 
-    def test_eigenvalue_family_names_differ(self):
-        """The naming mismatch, pinned so it stays visible."""
+    def test_eigenvalue_family_names_match_the_benchmark(self):
+        """The fix, pinned: the corpus family uses the benchmark's name."""
         from la.problems import GENERATORS
         from la.benchprompt import TASKS
-        self.assertIn("eigenvalues", GENERATORS)
+        self.assertIn("eigenvalue", GENERATORS)
+        self.assertIn("eigenvalue_numeric", GENERATORS)
         self.assertIn("eigenvalue", TASKS)
 
-    def test_the_two_eigenvalue_names_diverge_on_the_body_hint(self):
-        """A second, smaller mismatch, in the same family.
-
-        The benchmark's 'eigenvalue' asks for "your final answers", plural.
-        The corpus's 'eigenvalues' falls through to the determinant hint,
-        which asks for a "final numerical answer", singular. It is a
-        cosmetic difference next to the exact-versus-decimal content
-        problem, but it is the same root cause: two names for one family
-        and nobody reconciled them.
-        """
-        from la.benchprompt import body_hint
-        self.assertNotEqual(body_hint("eigenvalue"), body_hint("eigenvalues"))
+    def test_both_eigenvalue_families_use_the_benchmark_body_hint(self):
+        """Both families speak the benchmark's closing instruction."""
+        from la.benchprompt import BODY_HINTS, body_hint
+        self.assertEqual(body_hint("eigenvalue"), BODY_HINTS["eigenvalue"])
+        self.assertEqual(body_hint("eigenvalue_numeric"),
+                         BODY_HINTS["eigenvalue"])
         self.assertIn("answers", body_hint("eigenvalue"))
-        self.assertIn("numerical answer", body_hint("eigenvalues"))
 
 
 if __name__ == "__main__":

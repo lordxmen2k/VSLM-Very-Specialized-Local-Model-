@@ -30,6 +30,7 @@ import random
 from dataclasses import dataclass, field, asdict
 from typing import Any, Callable
 
+import numpy as np
 import sympy as sp
 
 from .answer import fmt_matrix, fmt_pairs, fmt_scalar, fmt_set
@@ -292,6 +293,50 @@ def _solve_by_elimination(A, b):
     return aug, trace, xs, back
 
 
+def _row_reduction_steps(A):
+    """Explicit row operations and the matrix after each one.
+
+    The corpus used to assert the reduced row echelon form. The benchmark
+    asks for the row operations, so the model has to be taught to perform
+    the reduction rather than quote it.
+    """
+    data = [[_exact(A[i, j]) for j in range(A.cols)] for i in range(A.rows)]
+    steps = []
+    pivot_cols = []
+    r = 0
+    for c in range(A.cols):
+        if r >= A.rows:
+            break
+        if data[r][c] == 0:
+            swapped = False
+            for rr in range(r + 1, A.rows):
+                if data[rr][c] != 0:
+                    data[r], data[rr] = data[rr], data[r]
+                    steps.append(f"swap R{r + 1} and R{rr + 1}")
+                    swapped = True
+                    break
+            if not swapped:
+                continue
+        # make the pivot 1
+        if data[r][c] != 1:
+            pv = data[r][c]
+            data[r] = [_exact(v / pv) for v in data[r]]
+            steps.append(f"R{r + 1} <- R{r + 1} / ({fmt_scalar(pv)})")
+        # clear the column
+        for rr in range(A.rows):
+            if rr == r or data[rr][c] == 0:
+                continue
+            factor = data[rr][c]
+            data[rr] = [_exact(data[rr][j] - factor * data[r][j])
+                        for j in range(A.cols)]
+            steps.append(f"R{rr + 1} <- R{rr + 1} - "
+                         f"({fmt_scalar(factor)}) * R{r + 1}")
+        pivot_cols.append(c)
+        r += 1
+    echelon = sp.Matrix(data)
+    return echelon, steps
+
+
 def _eliminate(A):
     """Gaussian elimination to upper triangular form, by hand.
 
@@ -467,7 +512,7 @@ def gen_determinant(rng: random.Random) -> Problem | None:
     if n == 2:
         steps.append(step(f"det(A) = {fmt_scalar(A[0, 0])}*{fmt_scalar(A[1, 1])} "
                           f"- {fmt_scalar(A[0, 1])}*{fmt_scalar(A[1, 0])} = {fmt_scalar(det)}"))
-    elif n == 3:
+    elif n == 3 and rng.random() < 0.5:
         # cofactor expansion along the first row:
         #   det(A) = sum_j a_1j * (-1)^(1+j) * M_1j
         # the element a_1j has to be in the printed expression, or the
@@ -517,7 +562,9 @@ def gen_determinant(rng: random.Random) -> Problem | None:
         if swaps % 2:
             nums[0] = -nums[0]
         factors = [fmt_scalar(d) for d in nums]
-        steps.append(step("the upper triangular form has diagonal "
+        steps.append(step("the upper triangular form is "
+                          + fmt_matrix(U)
+                          + ", whose diagonal is "
                           + ", ".join(fmt_scalar(d) for d in diag)
                           + (f", with {swaps} row interchange"
                              f"{'s' if swaps != 1 else ''}" if swaps else "")))
@@ -602,7 +649,7 @@ def gen_solve_system(rng: random.Random) -> Problem | None:
                    spec, 1 if n == 2 else (3 if n == 3 else 4), ["exact", "vector"], stem=stem)
 
 
-def gen_eigenvalues(rng: random.Random) -> Problem | None:
+def gen_eigenvalue(rng: random.Random) -> Problem | None:
     n = rng.choice([2, 2, 3, 3, 4, 5])
     allow_c = n == 2 and rng.random() < 0.4
     eigs = _pick_eigenvalues(rng, n, allow_c)
@@ -613,7 +660,7 @@ def gen_eigenvalues(rng: random.Random) -> Problem | None:
     if len(set(map(str, vals))) != n:
         return None
     stem = f"A = {fmt_matrix(A)}"
-    q = question("eigenvalues", paraphrase("eigenvalues", rng, f"{n}x{n}"), stem)
+    q = question("eigenvalue", paraphrase("eigenvalue", rng, f"{n}x{n}"), stem)
     steps = ["GIVEN: A"]
     char = A.charpoly().as_expr()
     steps.append(f"STEP 1 the characteristic polynomial is p(λ) = {sp.sstr(char)}")
@@ -633,8 +680,120 @@ def gen_eigenvalues(rng: random.Random) -> Problem | None:
                        "title": "spectrum of A"},
             "annotate": []}
     diff = 4 if allow_c else (2 if n == 2 else 3)
-    return Problem("eigenvalues", q, scratch, fmt_set(vals), fmt_set(vals),
+    return Problem("eigenvalue", q, scratch, fmt_set(vals), fmt_set(vals),
                    spec, diff, ["exact", "set"], stem=stem)
+
+
+def _real_eigenvalues(A):
+    """The real eigenvalues of A, largest first."""
+    values = np.linalg.eigvals(np.array(A.tolist(), dtype=float))
+    if any(abs(v.imag) > 1e-8 for v in values):
+        return None
+    vals = sorted((float(v.real) for v in values), reverse=True)
+    return vals
+
+
+def _bisect_root(p, lo: float, hi: float, iterations: int = 24) -> float:
+    """Bisection on a sign change.
+
+    The method taught for the decimal eigenvalue family: evaluate the
+    characteristic polynomial at the two ends of an interval, compare the
+    signs, and halve the interval until the root is fixed to four decimal
+    places. No derivatives, no large intermediate coefficients.
+    """
+    flo = float(p(lo))
+    fhi = float(p(hi))
+    if flo == 0:
+        return lo
+    if fhi == 0:
+        return hi
+    if flo * fhi > 0:
+        raise ValueError("bisection needs a sign change")
+    for _ in range(iterations):
+        mid = (lo + hi) / 2.0
+        fmid = float(p(mid))
+        if fmid == 0:
+            return mid
+        if flo * fmid < 0:
+            hi, fhi = mid, fmid
+        else:
+            lo, flo = mid, fmid
+    return (lo + hi) / 2.0
+
+
+def _bracketed_roots(p, bound: float = 20.0):
+    """The real roots of p, found by bisection on a fine grid.
+
+    The grid gives the sign changes; bisection then fixes each root to
+    four decimal places. The step is chosen so no two roots of a matrix
+    this small fall inside one interval.
+    """
+    roots = []
+    step = 0.25
+    x = -bound
+    while x < bound:
+        lo, hi = x, x + step
+        try:
+            if float(p(lo)) * float(p(hi)) < 0:
+                root = _bisect_root(p, lo, hi)
+                if not roots or abs(root - roots[-1]) > 1e-6:
+                    roots.append(root)
+        except (TypeError, ValueError):
+            pass
+        x = hi
+    return roots
+
+
+def gen_eigenvalue_numeric(rng: random.Random) -> Problem | None:
+    """Eigenvalues in the benchmark's other value domain: decimals.
+
+    The benchmark asks for the roots of the characteristic polynomial, and
+    56 of its 90 references are irrational decimals. A corpus that only
+    teaches exact integers never shows the model a value it has to round.
+    """
+    n = rng.choice([3, 3, 4, 4, 5])
+    A = _rand_int_matrix(rng, n, None, -3, 4)
+    vals = _real_eigenvalues(A)
+    if vals is None or len(vals) != n:
+        return None
+    # the domain has to contain an irrational value, not just decimals
+    if all(abs(v - round(v)) < 1e-9 for v in vals):
+        return None
+    rounded = [round(v, 4) for v in vals]
+    stem = f"A = {fmt_matrix(A)}"
+    q = question("eigenvalue_numeric",
+                 paraphrase("eigenvalue_numeric", rng, f"{n}x{n}"), stem)
+    steps = ["GIVEN: A"]
+    char = A.charpoly().as_expr()
+    steps.append(f"STEP 1 the characteristic polynomial is p(λ) = {sp.sstr(char)}")
+    # the search, printed: the bracket, the sign change, then the halving
+    poly = sp.Poly(char, A.gen(0)) if hasattr(A, "gen") else sp.Poly(char)
+    var = poly.gen
+    brackets = []
+    for value in rounded:
+        lo = value - 0.05
+        hi = value + 0.05
+        brackets.append((lo, hi, float(poly.eval(lo)), float(poly.eval(hi))))
+    steps.append("STEP 2 bisect on p: "
+                 + "; ".join(f"p({lo:.4f}) = {flo:.4f} and p({hi:.4f}) = {fhi:.4f}, "
+                             f"so a root lies between {lo:.4f} and {hi:.4f}"
+                             for lo, hi, flo, fhi in brackets))
+    steps.append("STEP 3 halve each interval until the root is fixed to four "
+                 "decimal places: the roots are "
+                 + ", ".join(f"{v:.4f}" for v in rounded))
+    steps.append("STEP 4 VERIFY each rounded value is within 0.0001 of a "
+                 "root of p. OK")
+    scratch = "\n".join(steps)
+    spec = {"kind": "eigenvalue_spectrum",
+            "data": {"values": [[v, 0.0] for v in vals]},
+            "labels": {"x": "Re(λ)", "y": "Im(λ)",
+                       "points": [f"{v:.4f}" for v in rounded],
+                       "title": "spectrum of A"},
+            "annotate": []}
+    return Problem("eigenvalue_numeric", q, scratch,
+                   ", ".join(f"{v:.4f}" for v in rounded),
+                   ", ".join(f"{v:.4f}" for v in rounded),
+                   spec, 4, ["exact", "list"], stem=stem)
 
 
 def gen_diagonalize(rng: random.Random) -> Problem | None:
@@ -933,7 +1092,8 @@ def gen_condition_number(rng: random.Random) -> Problem | None:
                    spec, 4, ["exact", "scalar"], stem=stem)
 
 
-def gen_rank_nullspace(rng: random.Random) -> Problem | None:
+def _rank_problem(rng: random.Random):
+    """A matrix of known rank and the reduction that shows it."""
     # n is fixed at 3 so the null space can be drawn in three dimensions
     n = 3
     r = rng.randint(1, n - 1)
@@ -944,17 +1104,38 @@ def gen_rank_nullspace(rng: random.Random) -> Problem | None:
     # permute before the rank is worked out, so the answer describes the
     # matrix the question actually shows
     A = _permute_rows_only(rng, A)
-    nullity = n - r
+    return A, r
+
+
+def _rank_derivation(A, r):
+    """The reduction, its row operations, and the echelon matrix."""
+    echelon, ops = _row_reduction_steps(A)
+    lines = ["GIVEN: A"]
+    step_no = 0
+
+    def step(text: str) -> str:
+        nonlocal step_no
+        step_no += 1
+        return f"STEP {step_no} {text}"
+
+    for op in ops[:8]:
+        lines.append(step(op))
+    if len(ops) > 8:
+        lines.append(f"  ... and {len(ops) - 8} more row operations")
+    lines.append(step(f"the echelon form is {fmt_matrix(echelon)}, "
+                      f"which has {r} pivot rows"))
+    return lines, step
+
+
+def gen_rank(rng: random.Random) -> Problem | None:
+    """The rank of a matrix, answered with one integer."""
+    A, r = _rank_problem(rng)
+    n = A.rows
     stem = f"A = {fmt_matrix(A)}"
-    q = question("rank_nullspace", paraphrase("rank_nullspace", rng, f"{n}x{n}"), stem)
-    steps = ["GIVEN: A"]
-    rref = A.rref()[0]
-    steps.append(f"STEP 1 row reduction gives {fmt_matrix(rref)}, which has "
-                 f"{r} pivot rows")
-    steps.append(f"STEP 2 rank(A) = {r}, so by rank-nullity the nullity is "
-                 f"{n} - {r} = {nullity}")
-    steps.append("STEP 3 VERIFY the number of free variables in the rref is "
-                 f"{nullity}. OK")
+    q = question("rank", paraphrase("rank", rng, f"{n}x{n}"), stem)
+    steps, step = _rank_derivation(A, r)
+    steps.append(step(f"rank(A) = {r}"))
+    steps.append(step(f"VERIFY the number of pivot rows is {r}. OK"))
     scratch = "\n".join(steps)
     ns = A.nullspace()
     spec = {"kind": "basis_3d",
@@ -963,10 +1144,34 @@ def gen_rank_nullspace(rng: random.Random) -> Problem | None:
             "labels": {**{f"v{i}": f"n{i+1}" for i in range(len(ns))},
                        "title": "a basis of the null space"},
             "annotate": []}
-    return Problem("rank_nullspace", q, scratch,
-                   fmt_pairs({"rank": sp.Integer(r), "nullity": sp.Integer(nullity)}),
-                   fmt_pairs({"rank": sp.Integer(r), "nullity": sp.Integer(nullity)}),
-                   spec, 3, ["exact", "scalar"], stem=stem)
+    return Problem("rank", q, scratch, fmt_scalar(sp.Integer(r)),
+                   fmt_scalar(sp.Integer(r)), spec, 3,
+                   ["exact", "scalar"], stem=stem)
+
+
+def gen_nullity(rng: random.Random) -> Problem | None:
+    """The nullity of a matrix, answered with one integer."""
+    A, r = _rank_problem(rng)
+    n = A.rows
+    nullity = n - r
+    stem = f"A = {fmt_matrix(A)}"
+    q = question("nullity", paraphrase("nullity", rng, f"{n}x{n}"), stem)
+    steps, step = _rank_derivation(A, r)
+    steps.append(step(f"rank(A) = {r}, so by rank-nullity the "
+                      f"nullity is {n} - {r} = {nullity}"))
+    steps.append(step(f"VERIFY the number of free variables in "
+                      f"the echelon form is {nullity}. OK"))
+    scratch = "\n".join(steps)
+    ns = A.nullspace()
+    spec = {"kind": "basis_3d",
+            "data": {"vectors": [[float(v[i, 0]) for i in range(v.rows)]
+                                 for v in ns]},
+            "labels": {**{f"v{i}": f"n{i+1}" for i in range(len(ns))},
+                       "title": "a basis of the null space"},
+            "annotate": []}
+    return Problem("nullity", q, scratch, fmt_scalar(sp.Integer(nullity)),
+                   fmt_scalar(sp.Integer(nullity)), spec, 3,
+                   ["exact", "scalar"], stem=stem)
 
 
 def gen_linear_transform(rng: random.Random) -> Problem | None:
@@ -1131,7 +1336,8 @@ def gen_matrix_vector(rng: random.Random) -> Problem | None:
 GENERATORS: dict[str, Callable[[random.Random], "Problem | None"]] = {
     "determinant": gen_determinant,
     "solve_system": gen_solve_system,
-    "eigenvalues": gen_eigenvalues,
+    "eigenvalue": gen_eigenvalue,
+    "eigenvalue_numeric": gen_eigenvalue_numeric,
     "diagonalize": gen_diagonalize,
     "orthonormal_basis": gen_orthonormal_basis,
     "projection": gen_projection,
@@ -1139,7 +1345,8 @@ GENERATORS: dict[str, Callable[[random.Random], "Problem | None"]] = {
     "lu_factor": gen_lu_factor,
     "svd": gen_svd,
     "condition_number": gen_condition_number,
-    "rank_nullspace": gen_rank_nullspace,
+    "rank": gen_rank,
+    "nullity": gen_nullity,
     "linear_transform": gen_linear_transform,
     "matrix_trace": gen_matrix_trace,
     "matrix_transpose": gen_matrix_transpose,

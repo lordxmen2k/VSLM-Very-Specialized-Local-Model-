@@ -59,6 +59,32 @@ data:
   # Generation is about 9 problems a second on one core and scales roughly
   # linearly with workers.
   generation_rate_per_second_per_core: 9
+  # Run 6 gives the nine benchmark families 70 per cent of the examples.
+  # The ten benchmark corpus families share 7000 points, 700 each. The nine
+  # background families share the remaining 3000 points, 333.33 each; the
+  # fraction below is rounded to 333 so the declared total stays integral.
+  family_weights:
+    # benchmark families: 10 of 19, 70 per cent of the corpus
+    determinant: 700
+    eigenvalue: 700
+    eigenvalue_numeric: 700
+    rank: 700
+    nullity: 700
+    matrix_trace: 700
+    matrix_transpose: 700
+    matrix_multiply: 700
+    matrix_power: 700
+    matrix_vector: 700
+    # background families: 9 of 19, 30 per cent of the corpus
+    solve_system: 333
+    diagonalize: 333
+    orthonormal_basis: 333
+    projection: 333
+    least_squares: 333
+    lu_factor: 333
+    svd: 333
+    condition_number: 333
+    linear_transform: 334
 
 benchmark:
   # LinAlg-Bench: SymPy-verified linear algebra problems across 3x3, 4x4 and

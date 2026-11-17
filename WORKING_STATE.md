@@ -1070,3 +1070,56 @@ protocol*, base scores 46.4% and the fine-tune scores 41.7%. Against a
 lenient read of the base model's prose, base scores ~50%. The fine-tune
 does not lose on mathematics; it loses on **answer shape**, in exactly the
 two families where the corpus teaches the wrong shape.
+
+---
+
+## Run 6 — implemented (2026-11-17)
+
+The design is `docs/superpowers/specs/2026-11-17-run-6-answer-contract-design.md`
+and the implementation plan is
+`docs/superpowers/plans/2026-11-17-run-6-answer-contract.md`.
+
+### What changed in the repository
+
+| change | where |
+|---|---|
+| one family -> benchmark subcategory map | `src/la/benchprompt.py` (`FAMILY_TO_SUBCAT`) |
+| `rank` and `nullity` are separate scalar families | `src/la/problems.py` |
+| `eigenvalue` (exact) and `eigenvalue_numeric` (four decimals) | `src/la/problems.py` |
+| the 3x3 determinant has both a cofactor and an elimination path | `src/la/problems.py` |
+| the rank and determinant derivations show their row operations | `src/la/problems.py` |
+| 70/30 benchmark/background corpus mix, declared in the config | `configs/default.yaml`, `src/la/build_dataset.py` |
+| the contract checker | `scripts/check_corpus_contract.py`, `make contract-check` |
+
+The corpus now has **19 families** (17 in run 5, minus `rank_nullspace`, plus
+`rank`, `nullity`, `eigenvalue` and `eigenvalue_numeric` — `eigenvalues`
+became `eigenvalue`).
+
+### The measurement that changed the design
+
+The eigenvalue **shape** was never the problem. Measured against the real
+grader, the corpus's existing set literal wins **34/34** of the exact
+eigenvalue references, and true roots rounded to four decimals win
+**56/56** of the decimal ones. The corpus's 90 eigenvalues are 86 integers
+and 4 exact complex pairs — **zero irrationals**. The defect is the value
+domain, not the format.
+
+### The rerun procedure
+
+```bash
+make contract-check       # no GPU: the contract map must be clean
+make data                 # ~3 min: rebuild the 20,000-example corpus
+make check-arithmetic     # no GPU: every printed derivation adds up
+make train                # ~146 min on one RTX 4070 SUPER
+make eval                 # ~5 min: the held-out set, must not drop below 54.5%
+make bench-all            # ~36 min for the adapter, ~95 min for the base
+```
+
+**Target:** beat base's 46.4% overall, and beat base on each of 3x3, 4x4 and
+5x5. Run 5's adapter stays on disk, so the comparison is a one-command diff.
+
+### What is not yet measured
+
+No GPU ran in this session. The corpus-side work and every check that does
+not need a GPU are done; the score above is still a projection, not a
+result.

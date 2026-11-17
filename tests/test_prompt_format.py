@@ -37,7 +37,7 @@ class TestBenchmarkPromptFormat(unittest.TestCase):
         import random
         rng = random.Random(19)
         for family in ("determinant", "matrix_multiply", "matrix_vector",
-                       "matrix_trace", "rank_nullspace"):
+                       "matrix_trace", "rank", "nullity"):
             p = None
             for _ in range(40):
                 p = GENERATORS[family](rng)

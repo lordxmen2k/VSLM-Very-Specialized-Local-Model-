@@ -123,7 +123,7 @@ not match, and a GPU that is already busy.
 
 ---
 
-## The seventeen families
+## The nineteen families
 
 Every family is generated, verified by sympy, and paired with a figure.
 
@@ -131,7 +131,8 @@ Every family is generated, verified by sympy, and paired with a figure.
 |---|---|---|
 | `determinant` | det of an n×n integer matrix | matrix heatmap |
 | `solve_system` | solve Ax = b uniquely | A and its reduced row echelon form |
-| `eigenvalues` | the spectrum, real or complex | eigenvalues on the complex plane |
+| `eigenvalue` | the exact spectrum, real or complex | eigenvalues on the complex plane |
+| `eigenvalue_numeric` | the spectrum as four-decimal values | eigenvalues on the complex plane |
 | `diagonalize` | the diagonal form D in A = P D P⁻¹ | spectrum of D |
 | `orthonormal_basis` | Gram–Schmidt to an orthonormal set | the basis in 2D or 3D |
 | `projection` | projection of v onto span(w), and the residual | vector, projection, residual |
@@ -139,7 +140,8 @@ Every family is generated, verified by sympy, and paired with a figure.
 | `lu_factor` | L and U with LU = A | the upper triangular factor |
 | `svd` | the singular values | singular value spectrum |
 | `condition_number` | cond₂(A) | matrix heatmap |
-| `rank_nullspace` | rank and nullity | a basis of the null space |
+| `rank` | the rank of the matrix | a basis of the null space |
+| `nullity` | the dimension of the null space | a basis of the null space |
 | `linear_transform` | T(v) and the image of the unit square | the unit square and its image |
 | `matrix_trace` | tr(A) | matrix heatmap |
 | `matrix_transpose` | Aᵀ | matrix heatmap |
@@ -150,6 +152,29 @@ Every family is generated, verified by sympy, and paired with a figure.
 The last five exist because they are operation types a published benchmark
 uses. Without them a score on that benchmark would not be on the same axis as
 anyone else's.
+
+**Run 6 — the answer contract.** The corpus has to match the benchmark on
+four legs, not one: the system prompt, the closing instruction, the answer's
+shape and the answer's value domain. Run 5's fine-tune scored 41.7% against
+its base model's 46.4% because six of the nine benchmark families mismatched
+on at least one leg. Run 6 fixes all four:
+
+- `rank` and `nullity` are two scalar questions, not one labelled pair — the
+  grader reads the **last** number out of `rank = 2, nullity = 1`, so the
+  rank was invisible to it.
+- The eigenvalues come in both value domains: exact values (which win the 34
+  exact benchmark references) and four-decimal irrational values (which win
+  the other 56).
+- The 3×3 determinant is taught by **both** cofactor expansion and
+  elimination, because the benchmark instructs cofactors in 18 of its 50
+  3×3 problems but the base model — which does not use cofactors — scores
+  36% where the fine-tune scored 0.7%.
+- The rank and determinant derivations **show the row operations and their
+  results** instead of asserting a reduced form the model was never taught
+  to produce.
+
+`make contract-check` prints the whole map and fails on a mismatch, without
+a GPU.
 
 ---
 
@@ -441,8 +466,29 @@ make check-arithmetic
 ```
 
 ```
-checked 3400 problems across 17 families
+checked 3800 problems across 19 families
 every printed expression evaluates to the value it claims
+```
+
+### Check the corpus's answer contract
+
+```bash
+make contract-check
+```
+
+This prints the system prompt, the closing instruction, the answer shape and
+the value domain for every benchmark family, and exits nonzero if any of
+them is not the benchmark's own. It is the check that would have found run
+5's four contract defects before a 2.5-hour training run.
+
+```
+family               subcat           system   body     shape    domain
+-----------------------------------------------------------------------
+determinant          determinant      OK       OK       scalar   integer
+eigenvalue           eigenvalue       OK       OK       list     integer
+eigenvalue_numeric   eigenvalue       OK       OK       list     decimal
+...
+CONTRACT OK: every benchmark family matches the benchmark's system prompt, closing instruction and answer shape.
 ```
 
 ### Measure what a training step costs

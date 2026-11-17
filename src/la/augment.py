@@ -40,7 +40,13 @@ TEMPLATES: dict[str, list[str]] = {
         "Determine x for the system given.",
         "Work out the solution of the system.",
     ],
-    "eigenvalues": [
+    "eigenvalue": [
+        "Find the eigenvalues of the {size} matrix A.",
+        "What are the eigenvalues of the matrix A?",
+        "Determine the spectrum of the matrix A.",
+        "Compute the eigenvalues of the matrix A.",
+    ],
+    "eigenvalue_numeric": [
         "Find the eigenvalues of the {size} matrix A.",
         "What are the eigenvalues of the matrix A?",
         "Determine the spectrum of the matrix A.",
@@ -88,11 +94,17 @@ TEMPLATES: dict[str, list[str]] = {
         "What is the 2-norm condition number of the matrix?",
         "Find cond_2 of the matrix.",
     ],
-    "rank_nullspace": [
-        "Determine the rank and the nullity (the dimension of the null space) "
-        "of the matrix.",
-        "Give the rank and the nullity of the matrix.",
-        "What are the rank of the matrix and the dimension of its null space?",
+    "rank": [
+        "Find the rank of the {size} matrix A.",
+        "Determine the rank of the matrix.",
+        "Compute the rank of the matrix A.",
+        "Find the rank of the matrix A.",
+    ],
+    "nullity": [
+        "Find the nullity of the {size} matrix A.",
+        "Determine the nullity (the dimension of the null space) of the matrix.",
+        "Compute the nullity of the matrix A.",
+        "Find the nullity of the matrix A.",
     ],
     "matrix_trace": [
         "Find the trace of the {size} matrix A.",
