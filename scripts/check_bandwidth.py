@@ -43,6 +43,11 @@ from la.inference import load_model              # noqa: E402
 
 
 def bench(fn, n=50, warmup=10):
+    """Wall clock around a loop, synchronized at the end.
+
+    This measures the ISSUE RATE, not the work: a CUDA launch returns
+    as soon as it is queued, so the GPU work overlaps the issuing.
+    """
     for _ in range(warmup):
         fn()
     torch.cuda.synchronize()
@@ -50,6 +55,18 @@ def bench(fn, n=50, warmup=10):
     for _ in range(n):
         fn()
     torch.cuda.synchronize()
+    return (time.perf_counter() - t) / n * 1000
+
+
+def bench_sync(fn, n=30, warmup=10):
+    """One call, synchronized before and after: the honest per-call latency."""
+    for _ in range(warmup):
+        fn()
+    torch.cuda.synchronize()
+    t = time.perf_counter()
+    for _ in range(n):
+        fn()
+        torch.cuda.synchronize()
     return (time.perf_counter() - t) / n * 1000
 
 
@@ -69,13 +86,17 @@ def main() -> int:
     print("  a plain copy of a contiguous buffer is the closest thing to")
     print("  a pure bandwidth test on a GPU.")
     print()
+    print("  Each copy is synchronised before and after it, so this is the")
+    print("  real cost of the transfer rather than the issue rate. A copy")
+    print("  reads and writes, so it moves twice the bytes of a read.")
+    print()
     print(f"  {'MB':>8} {'ms':>8} {'GB/s':>8}")
     best = 0.0
     for mb in (1, 4, 8, 16, 32, 64, 128, 256, 512):
         n = int(mb * 1e6 / 2)
         a = torch.empty(n, device=dev, dtype=torch.bfloat16)
         b = torch.empty(n, device=dev, dtype=torch.bfloat16)
-        t = bench(lambda: b.copy_(a), n=30, warmup=5)
+        t = bench_sync(lambda: b.copy_(a), n=20, warmup=5)
         gbs = (mb * 1e6) / (t / 1000) / 1e9
         best = max(best, gbs)
         print(f"  {mb:>8} {t:>8.4f} {gbs:>8.0f}")
@@ -87,6 +108,12 @@ def main() -> int:
 
     # --- the projections, against the MEASURED bandwidth ------------------
     print("=== the projections, against the measured bandwidth ===")
+    print("  NOTE: these are wall-clock times around a loop of launches.")
+    print("  A CUDA launch is asynchronous, so this measures how fast the")
+    print("  launches were ISSUED, not how long the work took. A small")
+    print("  projection and a large one can therefore show the same time.")
+    print("  scripts/check_projection_timing.py measures this properly.")
+    print()
     layer = model.model.layers[0]
     attn = layer.self_attn
     print(f"  {'projection':<14} {'MB':>7} {'ms':>8} {'GB/s':>8} "
@@ -103,10 +130,13 @@ def main() -> int:
         xi = torch.randn(bs, in_features, device=dev, dtype=model.dtype)
         t = bench(lambda: torch.nn.functional.linear(xi, w))
         mb = w.numel() * 2 / 1e6
-        floor = (mb * 1e6) / (best * 1e9) / 1e6
+        # the floor: bytes / (bytes per second), in milliseconds.
+        # best is in GB/s, so bytes per second is best * 1e9.
+        bytes_read = mb * 1e6
+        floor = bytes_read / (best * 1e9) * 1000.0
         total_ms += t
         total_floor += floor
-        gbs = (mb * 1e6) / (t / 1000) / 1e9
+        gbs = bytes_read / (t / 1000) / 1e9
         print(f"  {name:<14} {mb:7.1f} {t:8.4f} {gbs:8.0f} "
               f"{floor:11.4f} {t/floor:7.1f}x")
     print(f"  {'TOTAL per layer':<14} {'':>7} {total_ms:8.4f} {'':>8} "

@@ -415,3 +415,45 @@ measurement.
 cost is the kernel count, the fix is fewer kernels, and both obvious
 fixes are unavailable on Windows. The EOS fix is still worth ten times
 more than any of this.
+
+### The measurement method was wrong, not just the bandwidth
+
+The bandwidth curve looked impossible, and the reason is worth recording:
+
+| copy size | wall ms | GB/s |
+|---|---|---|
+| 1 MB | 0.0098 | 102 |
+| 4 MB | 0.0113 | 355 |
+| 8 MB | 0.0171 | 468 |
+| 16 MB | 0.0238 | **672** |
+| 32 MB | 0.1474 | 217 |
+| 64 MB | 0.3304 | 194 |
+| 128 MB | 0.6636 | 193 |
+| 512 MB | 2.5272 | 203 |
+
+Bandwidth *rising* with size up to 16 MB, then collapsing to a steady
+~200 GB/s, is not a memory system. It is an **asynchronous launch**
+artefact.
+
+`bench()` measured wall-clock time around a loop of kernel launches. A
+CUDA launch returns as soon as the work is *queued*, not when it
+finishes, so the loop measured how fast the launches were **issued** and
+the GPU work overlapped the issuing. The 672 GB/s at 16 MB was the
+launch cost overlapping the transfer, not an achievable bandwidth.
+
+The proof that the method was wrong: `gate_proj` reads 25.2 MB in
+0.0171 ms, while *copying* 25.2 MB took 0.1474 ms. A read cannot beat a
+copy of the same size, because a copy also writes. And every projection
+took 13 to 31 µs regardless of size — 4.2 MB and 25.2 MB the same —
+which is the signature of a launch-bound kernel, not a bandwidth-bound
+one.
+
+**The rule:** on a GPU, wall-clock time around a launch loop measures the
+issue rate. Synchronise per call, or use CUDA events, to measure the work.
+Every bandwidth or latency figure taken this way needs checking against
+the impossible-result test: *can a read beat a copy of the same bytes?*
+If it can, the method is wrong.
+
+`scripts/check_projection_timing.py` measures everything three ways —
+wall clock, CUDA events, and synchronise-per-call — so the overlap is
+visible rather than hidden.
