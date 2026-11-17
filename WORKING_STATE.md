@@ -777,3 +777,56 @@ significant digits.
 rather than left printing nothing useful. The RMSNorm attribution came
 from the transformers **source**, which is stronger evidence anyway: it
 is the code, not a sample of it.
+
+### The benchmark's closing instructions differ from the corpus's
+
+`compare_prompts.py` was rewritten. The old one compared raw TEXT prompts
+on the Base checkpoint and generated up to 2048 tokens per batch - about
+70 seconds a batch with no EOS supervision, which is why it looked hung.
+It also predated the run-5 migration: it compared the base model's raw
+text prompts, not the rendered chat prompts run 5 actually uses.
+
+The new script does no generation unless `--generate` is passed, and the
+cap defaults to 256.
+
+**What it found, measured over all 660 released problems:**
+
+| | count |
+|---|---|
+| carry a closing instruction mentioning `\boxed{}` | **440 / 660** |
+| carry **no** closing instruction at all | **220 / 660** |
+| use the corpus's **exact** closing wording | **126 / 660** |
+
+The 220 with no closing instruction are **the entire 4x4 file**. The
+3x3 and 5x5 files always carry one, but in **nine different wordings**:
+
+```
+Show all intermediate steps. Put your final numerical answer inside \boxed{}.
+Show your steps. Put your final numerical answer inside \boxed{}.
+Show all steps. List all eigenvalues inside \boxed{}.
+Put the final 3x3 result matrix inside \boxed{}.
+Put the final vector b inside \boxed{}.
+Write out A^T explicitly. Put the final matrix inside \boxed{}.
+Show your row operations. Put your final numerical answer inside \boxed{}.
+...
+```
+
+The corpus teaches **one** closing per family, always the same wording:
+`Show all intermediate steps. Put your final <type> answer inside
+\boxed{}.`
+
+**This is a distribution shift, not a format break.** The system prompt
+already says "Always put your final ... answer inside `\boxed{}`." for
+every subcategory, and the grader falls back from `\boxed{}` to the last
+value-like line. So a missing closing line is not fatal for scoring.
+
+**The decision: do not change it before seeing run 5's score.** If run 5
+underperforms on the 4x4 file specifically, the fix is to append the
+corpus's closing line to the benchmark prompt for the problems that lack
+one. Changing what the benchmark sends before measuring would make the
+score incomparable with the published baseline.
+
+`tests/test_benchmark_closing_instructions.py` pins the measured counts
+(440 / 220 / 126) so a change to the benchmark data or the prompt
+construction shows up as a test failure rather than as a silent
+regression.
