@@ -35,8 +35,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(
     os.path.abspath(__file__))), "src"))
 
 import torch                                     # noqa: E402
-from torch.profiler import (profile, ProfilerActivity,   # noqa: E402
-                            ProfilerConfig)
+from torch.profiler import (profile, ProfilerActivity)   # noqa: E402
 
 from la import hf_cache                          # noqa: E402
 from la.inference import load_model              # noqa: E402
@@ -44,8 +43,9 @@ from la.inference import load_model              # noqa: E402
 
 def count_kernels(model, past, nxt, bs):
     """Count the kernels in one decode step, grouped by op."""
-    with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
-                 config=ProfilerConfig(enable_kineto=True)) as prof:
+    # ProfilerConfig is not exported from torch.profiler (it lives in
+    # torch._C._profiler), and enable_kineto defaults to True anyway.
+    with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA]) as prof:
         with torch.no_grad():
             model(input_ids=nxt, past_key_values=past, use_cache=True)
         torch.cuda.synchronize()
@@ -119,12 +119,21 @@ def main() -> int:
     groups = nh // nkv
 
     n_ctx = 0
-    try:
-        for layer_ in past.layers:
-            for t in (layer_.keys, layer_.values):
-                if t is not None:
-                    n_ctx = max(n_ctx, t.shape[2])
-    except AttributeError:
+    for getter in (lambda: [t for l in past.layers
+                             for t in (l.keys, l.values) if t is not None],
+                   lambda: [t for (k, v) in past for t in (k, v)
+                             if t is not None],
+                   lambda: list(past)):
+        try:
+            tensors = getter()
+            n_ctx = max((t.shape[2] for t in tensors
+                         if hasattr(t, "shape") and t.dim() == 4),
+                        default=0)
+            if n_ctx:
+                break
+        except (AttributeError, TypeError, IndexError):
+            continue
+    if n_ctx <= 0:
         n_ctx = 1
     print(f"  {nh} query heads, {nkv} kv heads, head dim {hd}, "
           f"context {n_ctx}")
@@ -185,9 +194,9 @@ def main() -> int:
     print("  2 means and 2 reduces - but we see 4 each, and the mul")
     print("  count is 15.")
     print()
-    print("  The reliable way to attribute these is to profile ONE layer")
+    print("  The reliable way to attribute these is to profile the step")
     print("  with the profiler's stack traces and look at the recorded")
-    print("  source line. That is what the next script does.")
+    print("  source line. The last section of this script does that.")
     print()
 
     # --- attribute the copies, with source lines -------------------------
@@ -203,11 +212,12 @@ def main() -> int:
             torch.cuda.synchronize()
 
         seen = {}
+        raw = {}
         for evt in prof.events():
             if evt.key not in ("aten::copy_", "aten::mul", "aten::cat"):
                 continue
-            st = getattr(evt, "stack", None) or []
-            # find the deepest frame inside transformers or torch
+            st = list(getattr(evt, "stack", None) or [])
+            # find the deepest frame inside transformers
             frame = None
             for f in reversed(st):
                 name = f.split("\n")[0]
@@ -217,8 +227,11 @@ def main() -> int:
                     break
             if frame is None and st:
                 frame = st[-1].split("\n")[0]
+            if frame is None:
+                frame = "(no stack recorded)"
             key = (evt.key, frame)
             seen[key] = seen.get(key, 0) + 1
+            raw.setdefault(key, st)
 
         for (op, frame), n in sorted(seen.items(),
                                      key=lambda kv: -kv[1])[:14]:
@@ -228,6 +241,18 @@ def main() -> int:
         print("  The file:line is where the copy is issued. If it is in")
         print("  modeling_qwen3.py it is the attention or norm path; if in")
         print("  modeling_attn_mask_utils.py it is the mask.")
+        print()
+
+        # print the full stack of the most common offender, so the exact
+        # call site is visible rather than inferred
+        if seen:
+            (op, frame), n = max(seen.items(), key=lambda kv: kv[1])
+            print(f"  === the full stack for the top offender ===")
+            print(f"  {op} x{n}  {frame}")
+            print()
+            for f in raw[(op, frame)][-14:]:
+                print(f"      {f}")
+            print()
     except Exception as exc:
         print(f"  the stack-trace profile could not run: {exc}")
     print()
