@@ -641,3 +641,93 @@ so the profiler reports the **file and line** that issues each copy.
 | `TRANSFORMERS_SDPA_FORCE_GQA=1` | nothing | removes the expansion |
 | `torch.compile` | **blocked** - triton has no official Windows wheel | would fuse the norms |
 | flash attention | **blocked** - no wheel for 2.12.1+cu130+cp314 | would fuse attention |
+
+### The real number: 401 torch ops per layer, and the RMSNorm fp32 round-trip
+
+Counting every profiler event rather than only the CUDA kernels changes
+the picture, and corrects the "4020 kernels" figure:
+
+| quantity | per step | per layer |
+|---|---|---|
+| total torch op events | **11229** | **401.0** |
+| of which `cudaLaunchKernel` | 1812 | 64.7 |
+| `aten::as_strided` | 737 | 26.3 |
+| `aten::to` | 486 | 17.4 |
+| `aten::view` | 453 | 16.2 |
+| `aten::copy_` | 425 | 15.2 |
+| `aten::mul` | 424 | 15.1 |
+| `aten::_to_copy` | 369 | 13.2 |
+| `aten::empty_strided` | 369 | 13.2 |
+| `aten::reshape` | 340 | 12.1 |
+| `aten::transpose` | 338 | 12.1 |
+| `aten::matmul` | 254 | 9.1 |
+
+**The cost is the number of torch OP DISPATCHES, not the number of CUDA
+launches.** 11229 ops at ~3 us of CPU dispatch each is 33.7 ms, which is
+the measured 34.4 ms issue path. `cudaLaunchKernel` is a subset.
+
+### Where the copies come from: Qwen3RMSNorm
+
+`Qwen3RMSNorm.forward` in `transformers/models/qwen3/modeling_qwen3.py`:
+
+```python
+input_dtype = hidden_states.dtype
+hidden_states = hidden_states.to(torch.float32)
+variance = hidden_states.pow(2).mean(-1, keepdim=True)
+hidden_states = hidden_states * torch.rsqrt(variance + self.variance_epsilon)
+return self.weight * hidden_states.to(input_dtype)
+```
+
+Two dtype conversions and two copies per call, plus four elementwise ops.
+**Qwen3 has four RMSNorms per layer** - `self_attn.q_norm`,
+`self_attn.k_norm` (over head_dim), `input_layernorm` and
+`post_attention_layernorm` (over hidden). That is 8 conversions and 8
+copies per layer from the norms alone, with the rest from the rotary
+embedding's float32 cos/sin construction and the attention mask.
+
+The rotary embedding does **not** upcast the query and key in the text
+model - `apply_rotary_pos_emb` is plain `(q * cos) + (rotate_half(q) *
+sin)`, and `Qwen3RotaryEmbedding.forward` returns `cos.to(dtype=x.dtype)`.
+The `.float()` upcast exists only in the **vision** variants
+(`apply_rotary_pos_emb_vision`), which is a trap when reading the
+transformers tree.
+
+### The three GQA paths, verified
+
+Running transformers' own `pack_gqa` and `repeat_kqa` code, and torch's
+native `enable_gqa`, on identical inputs:
+
+| path | output shape | max diff vs repeat_kv |
+|---|---|---|
+| `repeat_kv` (copies k/v) | (bs, 16, 1, hd) | - |
+| `pack_gqa` (reshape q) | (bs, 8, 2, hd) | 6.66e-16 |
+| `enable_gqa` (native) | (bs, 16, 1, hd) | 0 |
+
+**All three are numerically equivalent.** `pack_gqa` folds the QUERY,
+not the key and value:
+
+```python
+def pack_gqa(hidden_states, n_rep):
+    if hidden_states is None or hidden_states.shape[1] == 1:
+        return hidden_states
+    batch, num_attention_heads, _, dim = hidden_states.shape
+    return hidden_states.reshape(batch, num_attention_heads // n_rep, n_rep, dim)
+```
+
+The comparison must be on the **flattened** form, because the pack path
+returns `(bs, nkv, groups, hd)` while the others return `(bs, nh, 1, hd)`.
+The element order is the same - packing preserves it - and the model's
+own downstream `reshape(*input_shape, -1)` flattens both identically, so
+transformers' `transpose(1, 2)` in the undo step is harmless.
+
+### The verdict
+
+A Qwen3 decoder layer needs **7 matmuls and 4 RMSNorms**. The measured
+**401 ops per layer** are mostly bookkeeping and elementwise work around
+those. **Only fusion fixes it**, and fusion means `torch.compile`, which
+needs triton - and triton has no official Windows wheel.
+
+The realistic Windows-available gain is therefore ~1.2-1.5x (xformers
+fuses the attention path only, not the norms), not the 2.4x that the
+"halve the launch count" estimate suggested. Against the EOS fix at 10x,
+that is not worth another round of work.

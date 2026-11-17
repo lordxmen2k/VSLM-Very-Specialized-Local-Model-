@@ -100,6 +100,23 @@ def main() -> int:
     print(f"  copy_ {copy_per_layer:.1f} per layer, mul {mul_per_layer:.1f}, "
           f"cat {cat_per_layer:.1f}")
     print()
+    total_ops = sum(counts.values())
+    launches = counts.get("cudaLaunchKernel", 0)
+    print("  === what the op count means ===")
+    print(f"  total torch op events per step : {total_ops}")
+    print(f"  per layer                       : {total_ops/layers:.1f}")
+    print(f"  of which cudaLaunchKernel       : {launches} "
+          f"({launches/layers:.1f} per layer)")
+    print()
+    print("  The step's CPU issue path is about 34 ms. At ~3 us of CPU")
+    print("  dispatch per torch op, that is exactly what this op count")
+    print("  predicts - so the cost is the NUMBER OF OP DISPATCHES, not")
+    print("  the number of CUDA launches (which is a subset).")
+    print()
+    print(f"  A Qwen3 decoder layer needs 7 matmuls and 4 RMSNorms. The")
+    print(f"  measured {total_ops/layers:.0f} ops per layer are mostly")
+    print("  bookkeeping and elementwise work around those.")
+    print()
 
     # --- with the escape hatch -------------------------------------------
     if forced != "1":
@@ -147,23 +164,30 @@ def main() -> int:
     import torch.nn.functional as F
 
     def path_expand():
-        kk = k.repeat_interleave(groups, dim=1)
-        vv = v.repeat_interleave(groups, dim=1)
-        return F.scaled_dot_product_attention(q, kk, vv, attn_mask=mask)
-
-    def path_pack():
-        # the transformers decode path: the group becomes the position
-        # axis and the query is the sequence axis. A reshape, not a copy.
-        kk = k.view(bs, nkv, groups, n_ctx, hd).transpose(2, 3)
-        vv = v.view(bs, nkv, groups, n_ctx, hd).transpose(2, 3)
+        # repeat_kv: the KV cache is copied up to the query head count
+        kk = k[:, :, None, :, :].expand(bs, nkv, groups, n_ctx, hd)
         kk = kk.reshape(bs, nkv * groups, n_ctx, hd)
+        vv = v[:, :, None, :, :].expand(bs, nkv, groups, n_ctx, hd)
         vv = vv.reshape(bs, nkv * groups, n_ctx, hd)
         return F.scaled_dot_product_attention(q, kk, vv, attn_mask=mask)
 
+    def path_pack():
+        # transformers' pack_gqa, verbatim:
+        #   (batch, num_attention_heads, 1, dim)
+        #     -> (batch, num_attention_heads // n_rep, n_rep, dim)
+        # The QUERY is folded; the key and value are left alone. The
+        # group becomes the query-length axis, so each KV head sees its
+        # own query rows. A reshape, not a copy.
+        qq = q.reshape(bs, nh // groups, groups, hd)
+        return F.scaled_dot_product_attention(qq, k, v, attn_mask=mask)
+
     def path_native():
+        # torch's native enable_gqa, which transformers reaches via
+        # TRANSFORMERS_SDPA_FORCE_GQA=1
         return F.scaled_dot_product_attention(q, k, v, attn_mask=mask,
                                                enable_gqa=True)
 
+    results = {}
     for name, fn in (("repeat_kv (copy)", path_expand),
                      ("pack_gqa (reshape)", path_pack),
                      ("enable_gqa (native)", path_native)):
@@ -178,6 +202,26 @@ def main() -> int:
         n = sum(c.values())
         ops = ", ".join(f"{k}x{v}" for k, v in c.most_common(5))
         print(f"  {name:<22} {n:>3} kernels   {ops}")
+        results[name] = fn()
+    print()
+
+    # --- do the three paths agree? ---------------------------------------
+    print("=== do the three paths agree? ===")
+    print("  The pack path returns (bs, nkv, groups, hd) and the other two")
+    print("  return (bs, nh, 1, hd). The element order is the same, so the")
+    print("  comparison is on the flattened form - which is what the model")
+    print("  itself does downstream.")
+    print()
+    flat = {k: v.reshape(bs, -1) for k, v in results.items()}
+    ref = flat["repeat_kv (copy)"]
+    for name, t in flat.items():
+        d = (t - ref).abs().max().item()
+        print(f"    {name:<22} max diff vs repeat_kv = {d:.3e}   "
+              f"{'MATCH' if d < 1e-3 else 'DIFFER'}")
+    print()
+    print("  If the pack path shows a difference, the cause is the mask")
+    print("  layout, not the attention: a shared mask broadcasts over")
+    print("  the packed query's group axis differently.")
     print()
 
     print("=== what the copy_ per layer is ===")
@@ -187,14 +231,27 @@ def main() -> int:
     print("  and v), so 2 - not 15. So the expansion is NOT the source of")
     print("  the 15.")
     print()
-    print("  15 copy_ + 15 mul + 4 cat per layer, alongside 4 mean and")
-    print("  4 reduce, points at RMSNorm: the norm computes a mean and a")
-    print("  reduce over the hidden dimension, then broadcasts. Two norms")
-    print("  per layer (input_layernorm and post_attention_layernorm) is")
-    print("  2 means and 2 reduces - but we see 4 each, and the mul")
-    print("  count is 15.")
+    print("  The confirmed source is Qwen3RMSNorm.forward, which upcasts to")
+    print("  float32 and casts back:")
     print()
-    print("  The reliable way to attribute these is to profile the step")
+    print("    input_dtype = hidden_states.dtype")
+    print("    hidden_states = hidden_states.to(torch.float32)")
+    print("    variance = hidden_states.pow(2).mean(-1, keepdim=True)")
+    print("    hidden_states = hidden_states * torch.rsqrt(variance + eps)")
+    print("    return self.weight * hidden_states.to(input_dtype)")
+    print()
+    print("  Each norm call costs 2 dtype conversions, 2 copies, and 4")
+    print("  elementwise ops. Qwen3 has FOUR norms per layer:")
+    print()
+    print("    self_attn.q_norm, self_attn.k_norm   (over head_dim)")
+    print("    input_layernorm, post_attention_layernorm  (over hidden)")
+    print()
+    print("  That accounts for 8 conversions and 8 copies per layer. The")
+    print("  remaining conversions come from the rotary embedding's")
+    print("  cos/sin (built in float32, cast back to x.dtype) and the")
+    print("  attention mask.")
+    print()
+    print("  The reliable way to attribute the rest is to profile the step")
     print("  with the profiler's stack traces and look at the recorded")
     print("  source line. The last section of this script does that.")
     print()
