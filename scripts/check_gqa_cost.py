@@ -74,8 +74,8 @@ def main() -> int:
     # --- each projection, against its own bandwidth floor --------------
     print()
     print("=== each projection, on its own ===")
-    print(f"  {'projection':<14} {'shape':<22} {'ms':>7} {'MB':>7} "
-          f"{'GB/s':>7} {'floor':>7} {'x floor':>8}")
+    print(f"  {'projection':<14} {'shape':<24} {'ms':>7} {'MB':>7} "
+          f"{'GB/s':>7} {'floor':>8} {'x floor':>8}")
     total_ms = 0.0
     total_floor = 0.0
     for name, mod in (("q_proj", attn.q_proj), ("k_proj", attn.k_proj),
@@ -84,16 +84,21 @@ def main() -> int:
                       ("up_proj", layer.mlp.up_proj),
                       ("down_proj", layer.mlp.down_proj)):
         w = mod.weight
-        t = bench(lambda: x @ w)
+        # the weight is stored (out_features, in_features); the matmul is
+        # x @ w.T, and torch.nn.functional.linear does the same thing
+        w_t = w.T
+        t = bench(lambda: torch.nn.functional.linear(x, w))
         mb = w.numel() * 2 / 1e6
-        floor = mb / 1e3 / (BW / 1e9)          # ms
+        # the floor: bytes / bandwidth, in milliseconds
+        floor = (mb * 1e6) / (BW / 1e9) / 1e6
         total_ms += t
         total_floor += floor
         shape = f"({bs}x{w.shape[1]})@({w.shape[1]}x{w.shape[0]})"
-        print(f"  {name:<14} {shape:<22} {t:7.4f} {mb:7.1f} "
-              f"{mb/1e3/(t/1000):7.0f} {floor:7.4f} {t/floor:7.1f}x")
-    print(f"  {'TOTAL per layer':<14} {'':<22} {total_ms:7.4f} "
-          f"{'':>7} {'':>7} {total_floor:7.4f} {total_ms/total_floor:7.1f}x")
+        gbs = (mb * 1e6) / (t / 1000) / 1e9
+        print(f"  {name:<14} {shape:<24} {t:7.4f} {mb:7.1f} "
+              f"{gbs:7.0f} {floor:8.4f} {t/floor:7.1f}x")
+    print(f"  {'TOTAL per layer':<14} {'':<24} {total_ms:7.4f} "
+          f"{'':>7} {'':>7} {total_floor:8.4f} {total_ms/total_floor:7.1f}x")
     print(f"  x {L} layers = {total_ms*L:.2f} ms of the step")
     print(f"  the bandwidth floor for all of it = {total_floor*L:.2f} ms")
 
@@ -109,8 +114,12 @@ def main() -> int:
     q16 = torch.randn(bs, nq, 1, d, device=dev, dtype=model.dtype)
 
     def expand():
-        return (k8.repeat_interleave(nq // nkv, dim=1),
-                v8.repeat_interleave(nq // nkv, dim=1))
+        # what transformers' repeat_kv does: expand then reshape, which
+        # materialises a copy of the whole kv cache
+        k = k8[:, :, None, :, :].expand(bs, nkv, nq // nkv, ctx, d)
+        v = v8[:, :, None, :, :].expand(bs, nkv, nq // nkv, ctx, d)
+        return (k.reshape(bs, nq, ctx, d),
+                v.reshape(bs, nq, ctx, d))
 
     t_exp = bench(expand, n=200)
     mb = 2 * bs * nq * ctx * d * 2 / 1e6
@@ -121,36 +130,105 @@ def main() -> int:
     # --- the attention, three ways --------------------------------------
     print()
     print("=== the attention itself, three ways ===")
+    print("  transformers picks between three paths in sdpa_attention_forward:")
+    print("    enable_gqa=True   when use_gqa_in_sdpa() is true - no expansion")
+    print("    pack_gqa          when q_length == 1 - a reshape, no copy")
+    print("    repeat_kv         otherwise - a full materialised copy")
+    print("  use_gqa_in_sdpa needs attention_mask is None, so a padded batch")
+    print("  never takes that path. The decode path is pack_gqa.")
 
     def attn_expanded():
         k, v = expand()
         torch.nn.functional.scaled_dot_product_attention(q16, k, v)
 
-    def attn_per_group():
-        g = nq // nkv
-        outs = []
-        for i in range(nkv):
-            outs.append(torch.nn.functional.scaled_dot_product_attention(
-                q16[:, i * g:(i + 1) * g], k8[:, i:i + 1], v8[:, i:i + 1]))
-        return torch.cat(outs, dim=1)
+    def attn_pack_gqa():
+        # what transformers does at q_length == 1: reshape the query so
+        # the attention runs on the key/value heads directly. No transpose:
+        # the result is (batch, num_kv_heads, n_rep, dim), and sdpa reads
+        # dim 2 as the sequence, so the two query rows of a group become
+        # two positions. No copy of the kv heads is made.
+        q = q16.reshape(bs, nkv, nq // nkv, d)
+        torch.nn.functional.scaled_dot_product_attention(q, k8, v8)
 
-    def attn_with_gqa_flag():
-        try:
-            torch.nn.functional.scaled_dot_product_attention(
-                q16, k8, v8, enable_gqa=True)
-        except TypeError:
-            torch.nn.functional.scaled_dot_product_attention(q16, k8, v8)
+    def attn_enable_gqa():
+        torch.nn.functional.scaled_dot_product_attention(
+            q16, k8, v8, enable_gqa=True)
 
-    for name, fn in (("expanded k/v", attn_expanded),
-                     ("per-group + cat", attn_per_group),
-                     ("enable_gqa flag", attn_with_gqa_flag)):
+    for name, fn in (("repeat_kv (prefill)", attn_expanded),
+                     ("pack_gqa (decode)", attn_pack_gqa),
+                     ("enable_gqa=True", attn_enable_gqa)):
         try:
             t = bench(fn, n=100)
-            print(f"  {name:<18} {t:6.4f} ms   x{L} = {t*L:.3f} ms")
+            print(f"  {name:<22} {t:6.4f} ms   x{L} = {t*L:.3f} ms")
         except Exception as exc:
-            print(f"  {name:<18} failed: {str(exc)[:70]}")
+            print(f"  {name:<22} failed: {str(exc)[:70]}")
+
+    # --- the model's own attention path ---------------------------------
+    print()
+    print("=== the model's own attention, through transformers ===")
+    print("  this is the code path that actually runs, with the model's")
+    print("  real query, key and value shapes.")
+    try:
+        from transformers.integrations.sdpa_attention import (
+            sdpa_attention_forward)
+        from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
+        iface = ALL_ATTENTION_FUNCTIONS.get_interface("sdpa", None)
+        print(f"  the registered sdpa interface: {iface}")
+
+        # the module the interface needs
+        attn_mod = layer.self_attn
+        attn_mod.num_key_value_groups = nq // nkv
+
+        q = torch.randn(bs, nq, 1, d, device=dev, dtype=model.dtype)
+        k = torch.randn(bs, nkv, ctx, d, device=dev, dtype=model.dtype)
+        v = torch.randn(bs, nkv, ctx, d, device=dev, dtype=model.dtype)
+
+        # a padding mask, as a batched decode has
+        mask = torch.zeros(bs, 1, 1, ctx, device=dev, dtype=model.dtype)
+
+        def attn_masked():
+            sdpa_attention_forward(attn_mod, q, k, v, mask,
+                                   dropout=0.0, scaling=d ** -0.5,
+                                   is_causal=False)
+
+        def attn_nomask():
+            sdpa_attention_forward(attn_mod, q, k, v, None,
+                                   dropout=0.0, scaling=d ** -0.5,
+                                   is_causal=False)
+
+        for name, fn in (("with a padding mask", attn_masked),
+                         ("without a mask", attn_nomask)):
+            try:
+                t = bench(fn, n=100)
+                print(f"  {name:<22} {t:6.4f} ms   x{L} = {t*L:.3f} ms")
+            except Exception as exc:
+                print(f"  {name:<22} failed: {str(exc)[:70]}")
+    except Exception as exc:
+        print(f"  could not call transformers' attention directly: {exc}")
 
     # --- the verdict ----------------------------------------------------
+    print()
+    print("=== the verdict ===")
+    print("  transformers chooses between three paths in")
+    print("  sdpa_attention_forward:")
+    print("    enable_gqa=True   use_gqa_in_sdpa() is true")
+    print("    pack_gqa          q_length == 1, a reshape, no copy")
+    print("    repeat_kv         otherwise, a full materialised copy")
+    print()
+    print("  use_gqa_in_sdpa needs attention_mask is None. A batched decode")
+    print("  has a padding mask, so it never takes that path - which is")
+    print("  why the first path is unavailable in practice here.")
+    print()
+    print("  There is an escape hatch: TRANSFORMERS_SDPA_FORCE_GQA=1 makes")
+    print("  use_gqa_in_sdpa return True regardless of the mask. Try it:")
+    print()
+    print("      TRANSFORMERS_SDPA_FORCE_GQA=1 python scripts/check_gqa_cost.py")
+    print()
+    print("  It may not help: with a mask present, sdpa cannot use a fused")
+    print("  kernel anyway, and the math backend would still expand - but")
+    print("  it is one environment variable to try before installing")
+    print("  anything.")
+    print()
     print()
     print("=== the verdict ===")
     prompt = ("Find the determinant of the 3x3 matrix A.\n\n"

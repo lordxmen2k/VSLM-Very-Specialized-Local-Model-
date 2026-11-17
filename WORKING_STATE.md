@@ -328,3 +328,47 @@ A model that stops after 206 tokens instead of 2048 saves ten times more
 than any launch-overhead or attention-backend work. The token count was the
 bigger lever, and the prompt-mismatch diagnosis had already found it.
 **Weigh the fix against the alternative before optimising.**
+
+### How transformers actually handles the grouped-query expansion
+
+The `cat`, `copy_` and `mul` per layer come from `sdpa_attention_forward`
+in `transformers/integrations/sdpa_attention.py`, which picks between three
+paths:
+
+```python
+if hasattr(module, "num_key_value_groups") and module.num_key_value_groups > 1:
+    if use_gqa_in_sdpa(attention_mask, key, value):
+        sdpa_kwargs["enable_gqa"] = True     # no expansion at all
+    elif q_length == 1:
+        query = pack_gqa(query, module.num_key_value_groups)
+        attention_mask = pack_gqa(attention_mask, module.num_key_value_groups)
+    else:
+        key = repeat_kv(key, module.num_key_value_groups)
+        value = repeat_kv(value, module.num_key_value_groups)
+```
+
+* `use_gqa_in_sdpa` returns `attention_mask is None and key.shape[-1] ==
+  value.shape[-1] <= 256`. **A batched decode has a padding mask, so this
+  path is unavailable in practice** — the native `enable_gqa=True` that
+  would avoid the expansion entirely is not reachable.
+* `pack_gqa` is the decode path (`q_length == 1`). It is a *reshape*, not a
+  copy: `(batch, 16 heads, 1, 128)` becomes `(batch, 8, 2, 128)`, so sdpa
+  reads the two query rows of a group as two positions and the key/value
+  heads are used directly at 8. No kv copy is made.
+* `repeat_kv` is the prefill path, and it *does* materialise a copy of the
+  whole kv cache.
+
+All three paths are numerically equivalent (checked: expand versus
+`pack_gqa` differ by 5e-7, expand versus `enable_gqa` by 0).
+
+**The escape hatch:** `TRANSFORMERS_SDPA_FORCE_GQA=1` makes
+`use_gqa_in_sdpa` return True regardless of the mask. It may not help,
+because with a mask present sdpa cannot use a fused kernel anyway and the
+math backend would still expand — but it is one environment variable to try
+before installing anything.
+
+**The deeper point:** the expansion is a *transformers* decision, not a
+torch one. torch's `scaled_dot_product_attention` takes `enable_gqa=True`
+and handles it natively; it is transformers that declines to use it when a
+mask is present, because a masked GQA call falls back to the math kernel,
+which is slower than expanding.
