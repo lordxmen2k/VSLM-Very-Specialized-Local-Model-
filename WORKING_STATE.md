@@ -579,3 +579,65 @@ At 34.4 ms a step, 2048 tokens is 70.5 s per sequence and 206 tokens is
 78 minutes. **The platform walls cap the speedup at 1.3-2x; the EOS fix
 is worth 10x. They are not comparable, and the EOS fix is already
 implemented.**
+
+### The launch cost is 7.08 us, and that is the whole step
+
+Measured on its own, with a trivial kernel, so the per-launch figure is
+comparable with the 8.6 us the step implies:
+
+| measurement | per launch |
+|---|---|
+| issue only (GPU work overlapping) | **7.08 us** |
+| with a synchronize after each | 14.88 us |
+
+A CUDA launch is normally **3-5 us** of CPU time. 7.08 us is slow, and
+it is a property of this machine, not of the model.
+
+| quantity | value |
+|---|---|
+| 4020 launches x 7.08 us | 28.5 ms |
+| measured issue path | 34.4-37.1 ms |
+
+The two agree, so **the step is the launch cost.** There is no other
+explanation to look for.
+
+What the fixes are worth:
+
+| change | step |
+|---|---|
+| now | 34.4 ms |
+| 4020 -> 2000 launches | 14.2 ms (2.4x) |
+| 7.08 us -> 4 us per launch | 17.2 ms (2.0x) |
+| both | 7.1 ms (4.8x) |
+
+**And the original 4% GPU utilisation reading now has an explanation.**
+A CPU-bound step leaves the GPU idle 98.6% of the time, which is exactly
+what a 4% GPU reading looks like. That observation from the original
+stall report is consistent with everything measured since.
+
+### The unexplained 15 copy_ per layer
+
+The kernel breakdown divides evenly by 28: `aten::mm` 197 (28x7 - the
+projections, correct), `aten::copy_` 425 (28x15), `aten::mul` 424
+(28x15), `aten::cat` 113 (28x4), `aten::mean` 113 (28x4), `aten::reduce`
+113 (28x4), `aten::add` 226 (28x8), `aten::bmm` 57 (28x2).
+
+At decode time `q_length == 1`, so transformers should take `pack_gqa` -
+a **reshape, not a copy**. Yet there are 15 copies per layer. The GQA
+expansion would be **2** copies per layer (k and v), not 15, so the
+expansion is probably not the source and something else is copying.
+
+`scripts/check_gqa_kernels.py` settles this by measurement rather than by
+reading transformers' source: it counts the kernels under each of the
+three GQA paths in isolation, and profiles the step with `with_stack=True`
+so the profiler reports the **file and line** that issues each copy.
+
+### Available on Windows, in descending order of value
+
+| option | cost | effect |
+|---|---|---|
+| EOS supervision | already implemented | **10x** |
+| xformers memory-efficient backend | `pip install xformers` | fuses attention, native GQA |
+| `TRANSFORMERS_SDPA_FORCE_GQA=1` | nothing | removes the expansion |
+| `torch.compile` | **blocked** - triton has no official Windows wheel | would fuse the norms |
+| flash attention | **blocked** - no wheel for 2.12.1+cu130+cp314 | would fuse attention |
