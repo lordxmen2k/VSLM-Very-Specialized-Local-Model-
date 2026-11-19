@@ -153,11 +153,11 @@ The last five exist because they are operation types a published benchmark
 uses. Without them a score on that benchmark would not be on the same axis as
 anyone else's.
 
-**Run 6 — the answer contract.** The corpus has to match the benchmark on
-four legs, not one: the system prompt, the closing instruction, the answer's
-shape and the answer's value domain. Run 5's fine-tune scored 41.7% against
-its base model's 46.4% because six of the nine benchmark families mismatched
-on at least one leg. Run 6 fixes all four:
+**Run 6 — the answer contract, measured.** The corpus has to match the
+benchmark on four legs, not one: the system prompt, the closing instruction,
+the answer's shape and the answer's value domain. Run 5's fine-tune scored
+41.7% against its base model's 46.4% because six of the nine benchmark
+families mismatched on at least one leg. Run 6 fixed all four:
 
 - `rank` and `nullity` are two scalar questions, not one labelled pair — the
   grader reads the **last** number out of `rank = 2, nullity = 1`, so the
@@ -173,8 +173,34 @@ on at least one leg. Run 6 fixes all four:
   results** instead of asserting a reduced form the model was never taught
   to produce.
 
+**Run 6's score was 230/660 = 34.8%, against the base model's 306/660 =
+46.4%.** It was a regression, and the cause turned out to be a fifth leg of
+the contract that nobody had looked for.
+
+**Run 7 — the prompt shape.** The benchmark does not send one prompt. It
+sends **three**, and the corpus only ever produced one of them.
+
+| leg | what the benchmark actually does | what the corpus did |
+|---|---|---|
+| the task line | names the matrix, e.g. "Find the determinant of the 4×4 matrix A." | matched |
+| the **method line** | "Use cofactor expansion along the first row." | **never produced** |
+| the **closing line** | two different ones per family | **one of the two** |
+| the **bare shape** | all 220 of the 4×4 problems are a matrix with no task and no closing line | **never produced** |
+
+So a third of the benchmark was scored on a prompt shape the model had never
+seen, and the 3×3 problems that name a method were scored on a prompt
+asking for a method the corpus had never been *asked* for — the corpus
+taught cofactor expansion and row reduction, but never put the request in
+the prompt.
+
+Run 7 teaches the prompt, not just the mathematics. `src/la/benchprompt_tails.py`
+holds every tail the benchmark uses, verbatim and with the benchmark's own
+counts, and `tests/test_tail_table_matches_benchmark.py` compares that table
+against the released problem files **line for line** — so the table cannot
+drift from the data the way a hand-written one did.
+
 `make contract-check` prints the whole map and fails on a mismatch, without
-a GPU.
+a GPU. It now checks all ten families against all three of their tails.
 
 ---
 

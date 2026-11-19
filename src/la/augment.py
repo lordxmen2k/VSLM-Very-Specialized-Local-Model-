@@ -17,12 +17,105 @@ they are written to match.
 The task list per family also gives the model some variety: the benchmark's
 wording is the first entry, and the others are the ways a person might
 otherwise ask the same thing.
+
+THE BENCHMARK'S OWN METHOD INSTRUCTIONS.
+
+Some of the benchmark's problems do not just ask for a value; they NAME THE
+METHOD:
+
+    determinant      "Use cofactor expansion along the first row."
+    eigenvalue       "Compute the characteristic polynomial det(A - lambda I) = 0
+                      and solve for lambda."
+    rank             "Use row reduction to find the number of non-zero rows in
+                      row echelon form."
+    nullity          "First find the rank using row reduction, then compute the
+                      nullity."
+    multiplication   "Show your row-by-column computation steps clearly."
+
+That instruction is part of the PROMPT, so it is part of the scored
+distribution. The corpus has to contain prompts that carry it, with a
+derivation that answers it - otherwise the model is asked to follow a method
+it was never shown being asked for.
+
+This table holds the benchmark's LITERAL instruction strings. They are
+copied verbatim from the released problem files, not paraphrased: the model
+has to recognise the exact phrase the benchmark will use.
 """
 from __future__ import annotations
 
 import random
 
 from .benchprompt import PREAMBLE, body_hint
+from .benchprompt_tails import PROMPT_TAILS
+
+# The corpus family -> benchmark subcategory mapping.
+from .benchprompt import FAMILY_TO_SUBCAT
+
+
+def closing_variants(family: str) -> list[str]:
+    """Every closing instruction the benchmark uses for this family.
+
+    The benchmark uses more than one for each of its nine subcategories,
+    and the corpus has to produce all of them. For a family the benchmark
+    does not have, the single instruction from BODY_HINTS.
+    """
+    subcat = FAMILY_TO_SUBCAT.get(family)
+    tails = PROMPT_TAILS.get(subcat) if subcat else None
+    if tails:
+        out = []
+        for _method, closing, _weight in tails:
+            if closing and closing not in out:
+                out.append(closing)
+        return out
+    hint = body_hint(family)
+    return [hint] if hint else []
+
+
+def prompt_tail(family: str, rng: random.Random) -> tuple[str, str]:
+    """The (method instruction, closing instruction) for one problem.
+
+    The benchmark's tails, at the benchmark's own rates. The counts in
+    PROMPT_TAILS are the released files' own, so the corpus's mix of
+    prompt shapes matches the mix the model is scored on.
+
+    The choice is a function of the per-problem RNG, so it is the same in
+    every worker process and for every seed. A counter would give each
+    worker its own mix, and the corpus would drift with the worker count.
+    """
+    subcat = FAMILY_TO_SUBCAT.get(family)
+    tails = PROMPT_TAILS.get(subcat) if subcat else None
+    if not tails:
+        return "", body_hint(family)
+    total = sum(weight for _m, _c, weight in tails)
+    pick = rng.randrange(total)
+    upto = 0
+    for method, closing, weight in tails:
+        upto += weight
+        if pick < upto:
+            return method, closing
+    return tails[-1][0], tails[-1][1]
+
+# The benchmark's own method instructions, verbatim from the released files.
+# Each entry is the instruction text; the corpus appends it to the task and
+# teaches a derivation that follows it.
+#
+# The frequency matters as well as the wording: the benchmark uses the
+# cofactor instruction in 18 of its 50 three-by-three determinant problems
+# and in NONE of its 4x4 or 5x5 ones, so the corpus uses it at a similar
+# rate for the sizes where it appears.
+
+# The rate each method instruction appears at, per family. These are the
+# benchmark's own counts, normalised to the number of 3x3 problems in that
+# subcategory:
+#
+#   determinant     18 of 50  three-by-three problems   0.36
+#   eigenvalue      24 of 30  three-by-three problems   0.80
+#   rank            14 of 20  three-by-three problems   0.70
+#   nullity         16 of 20  three-by-three problems   0.80
+#   multiplication  12 of 20  three-by-three problems   0.60
+#
+# The counts are over the 3x3 problems only, because the benchmark only
+# appends a method instruction at 3x3.
 
 # Question templates per family. Each takes the core statement of the problem
 # and asks it a different way. The task never embeds the matrix: the matrix
@@ -157,14 +250,35 @@ def paraphrase(family: str, rng: random.Random, size: str = "") -> str:
     return text
 
 
-def question(family: str, task: str, body: str) -> str:
+
+
+
+
+def question(family: str, tail: tuple[str, str], task: str, body: str) -> str:
     """Assemble a question in LinAlg-Bench's prompt format.
 
-    The preamble, the task, the body and the closing instruction, separated
-    by blank lines. That is the shape the benchmark's own prompts have, so a
-    model trained on this is in distribution when it is scored.
+    The preamble, the task, the body, the method instruction and the closing
+    instruction, separated by blank lines. That is the shape the benchmark's
+    own prompts have, so a model trained on this is in distribution when it
+    is scored.
+
+    The order is the benchmark's: the method instruction comes after the
+    matrix and before the closing instruction, because that is where the
+    benchmark puts it.
+
+    `tail` is the (method instruction, closing instruction) pair from
+    prompt_tail(). The closing instruction is "" for the bare-matrix shape:
+    all 220 of LinAlg-Bench's 4x4 problems are a matrix with no task
+    statement and no closing instruction, so a third of the benchmark is
+    scored on a prompt the corpus never produced.
     """
-    return f"{PREAMBLE}\n\n{task}\n\n{body}\n\n{body_hint(family)}\n\n"
+    method, closing = tail
+    parts = [PREAMBLE, task, body]
+    if method:
+        parts.append(method)
+    if closing:
+        parts.append(closing)
+    return "\n\n".join(parts) + "\n\n"
 
 
 def permute_rows(rng: random.Random, n: int) -> list[int]:

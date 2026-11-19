@@ -24,6 +24,14 @@ class TestRankNullitySplit(unittest.TestCase):
                                  "the answer field must not contain a labelled pair")
 
     def test_the_question_asks_for_only_the_named_quantity(self):
+        """The TASK asks for one quantity, not a pair.
+
+        "rank" may appear in a nullity prompt - the benchmark's own nullity
+        prompt says "First find the rank using row reduction, then compute
+        the nullity" - but the TASK line must ask for the nullity alone.
+        That is the defect run 5 had: the corpus taught a pair, and the
+        grader read the last number, which was the nullity.
+        """
         rank = generate("rank", random.Random(32))
         nullity = generate("nullity", random.Random(32))
         self.assertIsNotNone(rank)
@@ -31,7 +39,14 @@ class TestRankNullitySplit(unittest.TestCase):
         self.assertIn("rank", rank.question.lower())
         self.assertNotIn("nullity", rank.question.lower())
         self.assertIn("nullity", nullity.question.lower())
-        self.assertNotIn("rank", nullity.question.lower())
+
+        def task_line(question):
+            # the task is the line after the preamble
+            parts = [p for p in question.split("\n\n") if p.strip()]
+            return parts[1].lower() if len(parts) > 1 else ""
+
+        self.assertNotIn("rank", task_line(nullity.question))
+        self.assertNotIn("nullity", task_line(rank.question))
 
     def test_a_scalar_rank_answer_scores_against_a_rank_reference(self):
         p = generate("rank", random.Random(33))

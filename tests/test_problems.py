@@ -27,10 +27,19 @@ class TestProblems(unittest.TestCase):
                 if p.spec is not None:
                     self.assertEqual(validate_spec(p.spec), [])
                 # the prompt is the question, in the benchmark's format:
-                # the preamble, the task, the body, the closing instruction
+                # the preamble, the task, the body, and the closing
+                # instruction on the examples that carry one
                 self.assertTrue(p.prompt().startswith(PREAMBLE))
-                self.assertIn("Show all intermediate steps", p.prompt())
-                self.assertIn(body_hint(family), p.prompt())
+                from la.augment import closing_variants
+                allowed = closing_variants(family)
+                found = [v for v in allowed if v in p.prompt()]
+                if not found:
+                    # no closing instruction is the bare-matrix shape, which
+                    # is valid: all 220 of the benchmark's 4x4 problems are
+                    # a matrix with no closing instruction
+                    self.assertNotIn("Show all intermediate steps",
+                                     p.prompt())
+                    self.assertNotIn("Put the final", p.prompt())
                 self.assertIn("### Answer", p.completion())
                 self.assertIn("### Plot", p.completion())
 

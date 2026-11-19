@@ -182,6 +182,11 @@ class TestBenchmarkPromptMatchesTraining(unittest.TestCase):
         This is what makes the rendered prompts comparable at all. If the
         corpus asked a differently-shaped question, the model would still be
         answering a prompt it had never seen.
+
+        The closing instruction is checked on an example that HAS one: one
+        example in five is the bare-matrix shape that all 220 of the
+        benchmark's 4x4 problems arrive in, and that shape carries no
+        closing instruction by design.
         """
         import random
         from la.benchprompt import benchmark_prompt_pair
@@ -189,9 +194,9 @@ class TestBenchmarkPromptMatchesTraining(unittest.TestCase):
 
         rng = random.Random(41)
         p = None
-        for _ in range(40):
+        for _ in range(60):
             p = GENERATORS["determinant"](rng)
-            if p is not None:
+            if p is not None and "Show all intermediate steps" in p.question:
                 break
         row = p.to_json()
         _, user = benchmark_prompt_pair(row["question"], "determinant", "3x3")

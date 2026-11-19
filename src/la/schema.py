@@ -176,15 +176,26 @@ def validate_spec(spec: Any) -> list[str]:
     return errs
 
 
-def spec_features(spec: dict) -> dict:
+def spec_features(spec: Any) -> dict:
     """Extract the numeric content of a spec for exact comparison.
 
     Two specs are considered to depict the same figure when their feature
     vectors match. This is how the evaluation harness compares a model's plot
     against the reference: on numbers, not on pixels.
+
+    The spec comes from the MODEL's output, so it can be any shape at all. A
+    model that writes `"data": [[1, 2], [3, 4]]` instead of an object used
+    to crash the whole held-out evaluation with an AttributeError, which
+    cost the entire score rather than one problem. A malformed spec now
+    yields empty features: it never matches a good one, and it never stops
+    the run.
     """
+    if not isinstance(spec, dict):
+        return {"kind": None}
     kind = spec.get("kind")
-    data = spec.get("data", {}) or {}
+    data = spec.get("data")
+    if not isinstance(data, dict):
+        data = {}
     feats: dict[str, Any] = {"kind": kind}
     if kind in ("basis_2d", "basis_3d"):
         feats["vectors"] = _round_all(data.get("vectors", []))

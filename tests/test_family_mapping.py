@@ -33,12 +33,28 @@ class TestFamilyMapping(unittest.TestCase):
                 self.assertEqual(FAMILY_TO_SUBCAT.get(family), subcat)
 
     def test_benchmark_family_prompt_is_the_benchmark_prompt(self):
+        """Every benchmark family uses the benchmark's system prompt, and
+        one of the benchmark's own closing instructions when it carries one.
+
+        The benchmark uses more than one closing instruction per family,
+        and the 4x4 file's problems carry none at all, so the closing
+        instruction is checked for membership in the family's set.
+        """
+        from la.augment import closing_variants
         for family, subcat in BENCHMARK_FAMILIES.items():
             with self.subTest(family=family):
-                p = generate(family, random.Random(10))
-                self.assertIsNotNone(p)
-                self.assertEqual(p.system_prompt(), SYSTEM_PROMPTS[subcat])
-                self.assertIn(BODY_HINTS[subcat], p.question)
+                allowed = closing_variants(family)
+                rng = random.Random(10)
+                saw_closing = False
+                for _ in range(60):
+                    p = generate(family, rng)
+                    self.assertIsNotNone(p)
+                    self.assertEqual(p.system_prompt(), SYSTEM_PROMPTS[subcat])
+                    if any(v in p.question for v in allowed):
+                        saw_closing = True
+                self.assertTrue(saw_closing,
+                                f"{family} never produced a closing "
+                                f"instruction")
 
     def test_the_contract_checker_reports_a_clean_contract(self):
         import os

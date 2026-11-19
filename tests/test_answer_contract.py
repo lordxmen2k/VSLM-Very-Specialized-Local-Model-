@@ -196,10 +196,14 @@ class TestDeterminantMethodIsNotTheOnlyOneTaught(unittest.TestCase):
                 f"determinant reference {ref!r} is not a scalar")
 
     def test_corpus_teaches_both_methods_for_3x3_determinants(self):
-        """The fix, pinned: the 3x3 determinant has a second path."""
+        """The fix, pinned: the 3x3 determinant has a second path.
+
+        The corpus draws a 3x3 determinant in one size out of eight, so 80
+        draws are not enough to see the rarer path. 400 are.
+        """
         rng = random.Random(7)
         methods = set()
-        for _ in range(80):
+        for _ in range(400):
             p = generate("determinant", rng)
             if p is None:
                 continue

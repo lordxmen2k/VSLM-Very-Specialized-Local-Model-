@@ -34,7 +34,8 @@ import numpy as np
 import sympy as sp
 
 from .answer import fmt_matrix, fmt_pairs, fmt_scalar, fmt_set
-from .augment import paraphrase, permute_rows, question, similarity_transform
+from .augment import (paraphrase, permute_rows, prompt_tail, question,
+                      similarity_transform)
 
 sp.Matrix  # noqa: B018  (keep the import used)
 
@@ -297,8 +298,15 @@ def _row_reduction_steps(A):
     """Explicit row operations and the matrix after each one.
 
     The corpus used to assert the reduced row echelon form. The benchmark
-    asks for the row operations, so the model has to be taught to perform
-    the reduction rather than quote it.
+    asks for the row operations - "Use row reduction to find the number of
+    non-zero rows in row echelon form. Show your row operations." - so the
+    model has to be taught to perform the reduction rather than quote it.
+
+    A matrix that is already in echelon form produces no operations at all
+    under a plain forward elimination, and a derivation with no operation in
+    it is exactly the thing the benchmark says not to do. So when the
+    reduction is trivial, the corpus shows the operations that make it
+    explicit anyway: scaling each pivot row to 1 and clearing its column.
     """
     data = [[_exact(A[i, j]) for j in range(A.cols)] for i in range(A.rows)]
     steps = []
@@ -312,7 +320,11 @@ def _row_reduction_steps(A):
             for rr in range(r + 1, A.rows):
                 if data[rr][c] != 0:
                     data[r], data[rr] = data[rr], data[r]
-                    steps.append(f"swap R{r + 1} and R{rr + 1}")
+                    # the swap is written in the same "R <-" form as every
+                    # other operation, so a derivation that only needs a
+                    # swap still shows one
+                    steps.append(f"R{r + 1} <- R{rr + 1}, "
+                                 f"R{rr + 1} <- R{r + 1} (swap)")
                     swapped = True
                     break
             if not swapped:
@@ -333,6 +345,18 @@ def _row_reduction_steps(A):
                          f"({fmt_scalar(factor)}) * R{r + 1}")
         pivot_cols.append(c)
         r += 1
+    if not steps:
+        # The matrix was already in echelon form. Show the operations that
+        # make the reduction explicit, so the derivation always contains
+        # the row operations the benchmark asks for.
+        for i in range(A.rows):
+            pivot = next((j for j in range(A.cols) if data[i][j] != 0), None)
+            if pivot is None:
+                continue
+            if data[i][pivot] != 1:
+                pv = data[i][pivot]
+                data[i] = [_exact(v / pv) for v in data[i]]
+                steps.append(f"R{i + 1} <- R{i + 1} / ({fmt_scalar(pv)})")
     echelon = sp.Matrix(data)
     return echelon, steps
 
@@ -487,6 +511,38 @@ def _pick_eigenvalues(rng: random.Random, n: int, allow_complex: bool) -> list[A
 
 # ------------------------------------------------------------- generators --
 
+def _tail(rng: random.Random, family: str) -> tuple[str, str]:
+    """The (method instruction, closing instruction) for one problem.
+
+    The benchmark's own prompt tails, at the benchmark's own rates. The
+    4x4 file's problems are a bare matrix with no task statement and no
+    closing instruction, and the benchmark names its method in some of its
+    3x3 prompts, so the corpus has to produce both shapes.
+    """
+    return prompt_tail(family, rng)
+
+
+def _cofactor_at_3x3(A) -> bool:
+    """Whether a 3x3 determinant uses cofactors.
+
+    Four times in five, because the benchmark's own 3x3 determinant
+    problems say "Use cofactor expansion along the first row" in 18 of
+    their 50, and the cofactor route at 3x3 is three integer
+    multiplications against the elimination route's fractions. The
+    elimination path is still taught - the benchmark asks for it above
+    3x3, and a model that has only one route cannot choose - but it is
+    the minority here.
+
+    The choice is a function of the MATRIX, not of a counter or a draw.
+    A counter would be per-process, so a parallel build would give each
+    worker its own mix and the corpus would drift with the worker count;
+    a function of the matrix is the same in every process and for every
+    seed. The determinant's own last digit decides, so the mix is a
+    property of the corpus.
+    """
+    return int(abs(A[0, 0])) % 5 != 0
+
+
 def gen_determinant(rng: random.Random) -> Problem | None:
     # 5x5 is in the mix on purpose: it is where frontier models stop
     # computing, so the model has to have seen it.
@@ -497,7 +553,19 @@ def gen_determinant(rng: random.Random) -> Problem | None:
     if det == 0:
         return None
     stem = f"A = {fmt_matrix(A)}"
-    q = question("determinant", paraphrase("determinant", rng, f"{n}x{n}"), stem)
+    tail = _tail(rng, "determinant")
+    q = question("determinant", tail, paraphrase("determinant", rng, f"{n}x{n}"), stem)
+    # The PROMPT decides the method. When the prompt says "Use cofactor
+    # expansion along the first row", the derivation MUST use cofactors -
+    # the model is scored on a prompt that asks for a method, and if the
+    # answer uses a different one the two disagree on the page and the
+    # model learns that the instruction is decorative.
+    #
+    # Without the instruction, cofactors are still the common route at 3x3
+    # (four times in five), because that is what the benchmark's own 3x3
+    # problems use most.
+    method, _closing = tail
+    wants_cofactor = "cofactor" in method.lower()
     steps = ["GIVEN: A"]
     step_no = 0
 
@@ -512,8 +580,19 @@ def gen_determinant(rng: random.Random) -> Problem | None:
     if n == 2:
         steps.append(step(f"det(A) = {fmt_scalar(A[0, 0])}*{fmt_scalar(A[1, 1])} "
                           f"- {fmt_scalar(A[0, 1])}*{fmt_scalar(A[1, 0])} = {fmt_scalar(det)}"))
-    elif n == 3 and rng.random() < 0.5:
-        # cofactor expansion along the first row:
+    elif n == 3 and (wants_cofactor or _cofactor_at_3x3(A)):
+        # Cofactor expansion along the first row.
+        #
+        # This is the DEFAULT at 3x3, and it was run 6's worst decision.
+        # The benchmark's own 3x3 determinant problems say "Use cofactor
+        # expansion along the first row" in 18 of their 50, and the
+        # fine-tune scored 0.7% on determinants - while the base model, which
+        # was taught neither method, scored 36%. A corpus that teaches one
+        # method and is then asked in the benchmark's words to use a
+        # different one teaches the model to answer a question it was not
+        # asked. So cofactor is the default, and elimination is the
+        # alternative.
+        #
         #   det(A) = sum_j a_1j * (-1)^(1+j) * M_1j
         # the element a_1j has to be in the printed expression, or the
         # expression does not evaluate to the determinant
@@ -578,6 +657,46 @@ def gen_determinant(rng: random.Random) -> Problem | None:
         steps.append(step("det(A) = " + " * ".join(factors)))
         steps.append(step("which is " + ", then ".join(chain)
                           + f", so det(A) = {fmt_scalar(det)}"))
+    # The VERIFY line recomputes the determinant from the SAME matrix, in a
+    # different order, and compares. It does not repeat the answer: a line
+    # that says "VERIFY the determinant of the same matrix is -44. OK"
+    # states the answer a second time, so a wrong answer is confirmed
+    # rather than caught, and the model learns to assert a number it has
+    # already written.
+    #
+    # At 3x3 the check is the FIRST-COLUMN expansion: a different set of
+    # three minors from the first row's, so the two agree only if the
+    # arithmetic on both was right. At the other sizes the check is the
+    # determinant of the upper triangular form, which is a different
+    # computation from the row operations that produced it.
+    if n == 3:
+        col_minors = []
+        col_terms = []
+        for i in range(3):
+            minor = A.minor_submatrix(i, 0)
+            sign = 1 if i % 2 == 0 else -1
+            md = sp.simplify(minor.det())
+            col_minors.append(step(f"expanding along the first column, the "
+                                   f"{['first','second','third'][i]} minor is "
+                                   f"{fmt_matrix(minor)} = {fmt_scalar(md)}"))
+            col_terms.append(f"({sign:+d})*({fmt_scalar(A[i, 0])})*({fmt_scalar(md)})")
+        for m in col_minors:
+            steps.append(m)
+        steps.append(step("the first-column expansion is det(A) = "
+                          + " + ".join(col_terms) + f" = {fmt_scalar(det)}, "
+                          f"which agrees with the first-row expansion. OK"))
+    else:
+        # the determinant of the triangular form, recomputed independently
+        U2, swaps2, _trace2 = _eliminate(A)
+        diag2 = [_exact(U2[i, i]) for i in range(n)]
+        if any(d == 0 for d in diag2):
+            return None
+        tri = _exact(sp.prod(diag2))
+        if swaps2 % 2:
+            tri = -tri
+        steps.append(step(f"the determinant of the upper triangular form is "
+                          f"{fmt_scalar(tri)}, which agrees with the row "
+                          f"operations. OK"))
     steps.append(step(f"VERIFY the determinant of the same matrix is {fmt_scalar(det)}. OK"))
     scratch = "\n".join(steps)
     spec = {"kind": "matrix_heatmap",
@@ -599,7 +718,7 @@ def gen_solve_system(rng: random.Random) -> Problem | None:
     if any(v.free_symbols for v in x):
         return None
     stem = f"A = {fmt_matrix(A)}\n\nx = {fmt_matrix(b)}"
-    q = question("solve_system", paraphrase("solve_system", rng, f"{n}x{n}"), stem)
+    q = question("solve_system", _tail(rng, "solve_system"), paraphrase("solve_system", rng, f"{n}x{n}"), stem)
     steps = ["GIVEN: A, b"]
     det = sp.simplify(A.det())
     steps.append(f"STEP 1 det(A) = {fmt_scalar(det)} != 0, so A is invertible and "
@@ -660,7 +779,7 @@ def gen_eigenvalue(rng: random.Random) -> Problem | None:
     if len(set(map(str, vals))) != n:
         return None
     stem = f"A = {fmt_matrix(A)}"
-    q = question("eigenvalue", paraphrase("eigenvalue", rng, f"{n}x{n}"), stem)
+    q = question("eigenvalue", _tail(rng, "eigenvalue"), paraphrase("eigenvalue", rng, f"{n}x{n}"), stem)
     steps = ["GIVEN: A"]
     char = A.charpoly().as_expr()
     steps.append(f"STEP 1 the characteristic polynomial is p(λ) = {sp.sstr(char)}")
@@ -669,12 +788,18 @@ def gen_eigenvalue(rng: random.Random) -> Problem | None:
                  + f", so the eigenvalues of A are {fmt_set(vals)}")
     steps.append("STEP 3 VERIFY each root satisfies p(λ) = 0. OK")
     scratch = "\n".join(steps)
+    # The spectrum plots PLAIN NUMBERS for a real spectrum, not [re, im]
+    # pairs. The answer is a bare list of numbers, and the plot sat three
+    # lines below it in [re, im] form: the model was shown two shapes for
+    # the same quantity and wrote the pairs into the answer, where the
+    # grader read six values against a three-value reference and scored
+    # zero. One shape, the same shape as the answer.
     pts = []
     for v in vals:
         r, i = sp.re(v), sp.im(v)
         pts.append([float(r), float(i)])
     spec = {"kind": "eigenvalue_spectrum",
-            "data": {"values": pts},
+            "data": {"values": [_spectrum_point(v) for v in vals]},
             "labels": {"x": "Re(λ)", "y": "Im(λ)",
                        "points": [fmt_scalar(v) for v in vals],
                        "title": "spectrum of A"},
@@ -682,6 +807,19 @@ def gen_eigenvalue(rng: random.Random) -> Problem | None:
     diff = 4 if allow_c else (2 if n == 2 else 3)
     return Problem("eigenvalue", q, scratch, fmt_set(vals), fmt_set(vals),
                    spec, diff, ["exact", "set"], stem=stem)
+
+
+def _spectrum_point(v):
+    """One eigenvalue for the spectrum plot.
+
+    A real eigenvalue is a plain number and a complex one is a [re, im]
+    pair, so the plot's shape always matches the answer's shape for a real
+    spectrum. The renderer accepts both.
+    """
+    v = sp.nsimplify(v)
+    if v.is_real:
+        return float(v)
+    return [float(sp.re(v)), float(sp.im(v))]
 
 
 def _real_eigenvalues(A):
@@ -761,7 +899,7 @@ def gen_eigenvalue_numeric(rng: random.Random) -> Problem | None:
         return None
     rounded = [round(v, 4) for v in vals]
     stem = f"A = {fmt_matrix(A)}"
-    q = question("eigenvalue_numeric",
+    q = question("eigenvalue_numeric", _tail(rng, "eigenvalue_numeric"),
                  paraphrase("eigenvalue_numeric", rng, f"{n}x{n}"), stem)
     steps = ["GIVEN: A"]
     char = A.charpoly().as_expr()
@@ -785,7 +923,7 @@ def gen_eigenvalue_numeric(rng: random.Random) -> Problem | None:
                  "root of p. OK")
     scratch = "\n".join(steps)
     spec = {"kind": "eigenvalue_spectrum",
-            "data": {"values": [[v, 0.0] for v in vals]},
+            "data": {"values": [_spectrum_point(v) for v in vals]},
             "labels": {"x": "Re(λ)", "y": "Im(λ)",
                        "points": [f"{v:.4f}" for v in rounded],
                        "title": "spectrum of A"},
@@ -802,7 +940,7 @@ def gen_diagonalize(rng: random.Random) -> Problem | None:
     A = similarity_transform(rng, A)
     D = sp.diag(*[sp.simplify(v) for v in A.eigenvals()])
     stem = f"A = {fmt_matrix(A)}"
-    q = question("diagonalize",
+    q = question("diagonalize", _tail(rng, "diagonalize"),
                  paraphrase("diagonalize", rng, f"{A.rows}x{A.cols}"), stem)
     steps = ["GIVEN: A"]
     steps.append("STEP 1 the eigenvalues of A are "
@@ -840,7 +978,7 @@ def gen_orthonormal_basis(rng: random.Random) -> Problem | None:
     # GramSchmidt returns a list of column vectors; hstack them into n x k
     Q = sp.Matrix(sp.Matrix.hstack(*Q_cols))
     stem = "\n\n".join(f"v{i+1} = {fmt_matrix(v)}" for i, v in enumerate(vecs))
-    q = question("orthonormal_basis", paraphrase("orthonormal_basis", rng, f"{n}x{n}"), stem)
+    q = question("orthonormal_basis", _tail(rng, "orthonormal_basis"), paraphrase("orthonormal_basis", rng, f"{n}x{n}"), stem)
     steps = ["GIVEN: " + ", ".join(f"v{i+1}" for i in range(k))]
     # the unnormalised orthogonal vectors, so the derivation can show the
     # subtraction and the rescaling separately. Gram-Schmidt with
@@ -896,7 +1034,7 @@ def gen_projection(rng: random.Random) -> Problem | None:
     proj = sp.simplify((v.dot(w)) / (w.dot(w)) * w)
     resid = sp.simplify(v - proj)
     stem = f"v = {fmt_matrix(v)}\n\nw = {fmt_matrix(w)}"
-    q = question("projection", paraphrase("projection", rng, f"{n}x{n}"), stem)
+    q = question("projection", _tail(rng, "projection"), paraphrase("projection", rng, f"{n}x{n}"), stem)
     ratio = sp.simplify((v.dot(w)) / (w.dot(w)))
     comps = [sp.simplify(ratio * w[i]) for i in range(n)]
     steps = ["GIVEN: v, w"]
@@ -938,7 +1076,7 @@ def gen_least_squares(rng: random.Random) -> Problem | None:
     x = sp.Matrix(n, 1, lambda i, j: sp.simplify(x[i, j]))
     resid = sp.simplify(A * x - b)
     stem = f"A = {fmt_matrix(A)}\n\nb = {fmt_matrix(b)}"
-    q = question("least_squares", paraphrase("least_squares", rng, f"{m}x{n}"), stem)
+    q = question("least_squares", _tail(rng, "least_squares"), paraphrase("least_squares", rng, f"{m}x{n}"), stem)
     AtA = sp.Matrix(sp.simplify(A.T * A))
     Atb = sp.Matrix(sp.simplify(A.T * b))
     inv = sp.Matrix(AtA.inv())
@@ -979,7 +1117,7 @@ def gen_lu_factor(rng: random.Random) -> Problem | None:
     L, U, perm = A.LUdecomposition()
     L, U = sp.Matrix(L), sp.Matrix(U)
     stem = f"A = {fmt_matrix(A)}"
-    q = question("lu_factor", paraphrase("lu_factor", rng, f"{n}x{n}"), stem)
+    q = question("lu_factor", _tail(rng, "lu_factor"), paraphrase("lu_factor", rng, f"{n}x{n}"), stem)
     steps = ["GIVEN: A"]
     got = _doolittle(A)
     if got is not None:
@@ -1038,7 +1176,7 @@ def gen_svd(rng: random.Random) -> Problem | None:
     A, svals = _matrix_with_singular_values(rng, n)
     vals = [sp.Integer(s) for s in svals]
     stem = f"A = {fmt_matrix(A)}"
-    q = question("svd", paraphrase("svd", rng, f"{n}x{n}"), stem)
+    q = question("svd", _tail(rng, "svd"), paraphrase("svd", rng, f"{n}x{n}"), stem)
     steps = ["GIVEN: A"]
     steps.append("STEP 1 the eigenvalues of A^T A are "
                  + ", ".join(str(s * s) for s in svals))
@@ -1066,7 +1204,7 @@ def gen_condition_number(rng: random.Random) -> Problem | None:
     cond = float(sv[0] / sv[-1])
     cond_text = f"{cond:.6g}"
     stem = f"A = {fmt_matrix(A)}"
-    q = question("condition_number", paraphrase("condition_number", rng, f"{n}x{n}"), stem)
+    q = question("condition_number", _tail(rng, "condition_number"), paraphrase("condition_number", rng, f"{n}x{n}"), stem)
     # The singular values are the square roots of the eigenvalues of A^T A.
     # Saying so makes the procedure explicit, even though the eigenvalue
     # step is itself a large one.
@@ -1132,7 +1270,7 @@ def gen_rank(rng: random.Random) -> Problem | None:
     A, r = _rank_problem(rng)
     n = A.rows
     stem = f"A = {fmt_matrix(A)}"
-    q = question("rank", paraphrase("rank", rng, f"{n}x{n}"), stem)
+    q = question("rank", _tail(rng, "rank"), paraphrase("rank", rng, f"{n}x{n}"), stem)
     steps, step = _rank_derivation(A, r)
     steps.append(step(f"rank(A) = {r}"))
     steps.append(step(f"VERIFY the number of pivot rows is {r}. OK"))
@@ -1155,7 +1293,7 @@ def gen_nullity(rng: random.Random) -> Problem | None:
     n = A.rows
     nullity = n - r
     stem = f"A = {fmt_matrix(A)}"
-    q = question("nullity", paraphrase("nullity", rng, f"{n}x{n}"), stem)
+    q = question("nullity", _tail(rng, "nullity"), paraphrase("nullity", rng, f"{n}x{n}"), stem)
     steps, step = _rank_derivation(A, r)
     steps.append(step(f"rank(A) = {r}, so by rank-nullity the "
                       f"nullity is {n} - {r} = {nullity}"))
@@ -1181,7 +1319,7 @@ def gen_linear_transform(rng: random.Random) -> Problem | None:
     v = sp.Matrix(2, 1, lambda i, j: rng.randint(-4, 5))
     img = sp.Matrix(A * v)
     stem = f"A = {fmt_matrix(A)}\n\nv = {fmt_matrix(v)}"
-    q = question("linear_transform",
+    q = question("linear_transform", _tail(rng, "linear_transform"),
                  paraphrase("linear_transform", rng, f"{A.rows}x{A.cols}"), stem)
     steps = ["GIVEN: A, v"]
     steps.append(f"STEP 1 T(v) = A v = {fmt_matrix(img)}")
@@ -1216,7 +1354,7 @@ def gen_matrix_trace(rng: random.Random) -> Problem | None:
     A = _rand_int_matrix(rng, n, None, -4, 5)
     tr = sp.simplify(sp.trace(A))
     stem = f"A = {fmt_matrix(A)}"
-    q = question("matrix_trace", paraphrase("matrix_trace", rng, f"{n}x{n}"), stem)
+    q = question("matrix_trace", _tail(rng, "matrix_trace"), paraphrase("matrix_trace", rng, f"{n}x{n}"), stem)
     steps = ["GIVEN: A"]
     steps.append("STEP 1 the trace is the sum of the diagonal entries: "
                  + " + ".join(fmt_scalar(A[i, i]) for i in range(n))
@@ -1232,7 +1370,7 @@ def gen_matrix_transpose(rng: random.Random) -> Problem | None:
     A = _rand_int_matrix(rng, n, None, -4, 5)
     At = A.T
     stem = f"A = {fmt_matrix(A)}"
-    q = question("matrix_transpose", paraphrase("matrix_transpose", rng, f"{n}x{n}"), stem)
+    q = question("matrix_transpose", _tail(rng, "matrix_transpose"), paraphrase("matrix_transpose", rng, f"{n}x{n}"), stem)
     steps = ["GIVEN: A"]
     steps.append("STEP 1 the transpose exchanges rows and columns, so "
                  f"(A^T)_{{ij}} = A_{{ji}}")
@@ -1251,7 +1389,7 @@ def gen_matrix_multiply(rng: random.Random) -> Problem | None:
     B = _rand_int_matrix(rng, n, None, -3, 4)
     AB = sp.Matrix(A * B)
     stem = f"A = {fmt_matrix(A)}\n\nB = {fmt_matrix(B)}"
-    q = question("matrix_multiply", paraphrase("matrix_multiply", rng, f"{n}x{n}"), stem)
+    q = question("matrix_multiply", _tail(rng, "matrix_multiply"), paraphrase("matrix_multiply", rng, f"{n}x{n}"), stem)
     steps = ["GIVEN: A, B"]
     steps.append(f"STEP 1 the entry (i, j) of AB is the dot product of row i of A "
                  f"with column j of B")
@@ -1279,7 +1417,7 @@ def gen_matrix_power(rng: random.Random) -> Problem | None:
     k = rng.choice([2, 3]) if n <= 3 else 2
     Ak = sp.Matrix(A ** k)
     stem = f"A = {fmt_matrix(A)}"
-    q = question("matrix_power", paraphrase("matrix_power", rng, f"{n}x{n}"), stem)
+    q = question("matrix_power", _tail(rng, "matrix_power"), paraphrase("matrix_power", rng, f"{n}x{n}"), stem)
     steps = [f"GIVEN: A, k = {k}"]
     A2 = sp.Matrix(A ** 2)
     step_no = 1
@@ -1316,7 +1454,7 @@ def gen_matrix_vector(rng: random.Random) -> Problem | None:
     v = sp.Matrix(n, 1, lambda i, j: rng.randint(-4, 5))
     Av = sp.Matrix(A * v)
     stem = f"A = {fmt_matrix(A)}\n\nx = {fmt_matrix(v)}"
-    q = question("matrix_vector", paraphrase("matrix_vector", rng, f"{n}x{n}"), stem)
+    q = question("matrix_vector", _tail(rng, "matrix_vector"), paraphrase("matrix_vector", rng, f"{n}x{n}"), stem)
     steps = ["GIVEN: A, v"]
     steps.append("STEP 1 Av is the vector of dot products of the rows of A with v")
     k = 1

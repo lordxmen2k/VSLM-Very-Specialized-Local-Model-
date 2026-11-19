@@ -1123,3 +1123,148 @@ make bench-all            # ~36 min for the adapter, ~95 min for the base
 No GPU ran in this session. The corpus-side work and every check that does
 not need a GPU are done; the score above is still a projection, not a
 result.
+
+## RUN 6 RESULT — 230/660 = 34.8%, a regression (2026-11-17)
+
+The rerun was genuine: it pulled the run-6 commit, the contract checker
+passed, the corpus had 19 families at the 70/30 mix, the arithmetic check
+passed, and the adapter trained to `runs/vslm-run6`.
+
+| | run 5 | run 6 | base |
+|---|---|---|---|
+| overall | 275/660 = 41.7% | **230/660 = 34.8%** | 306/660 = 46.4% |
+| 3×3 | 52.7% | 44.5% | 75.0% |
+| 4×4 | 43.6% | 37.7% | 41.8% |
+| 5×5 | 28.6% | 22.3% | 22.3% |
+
+Per family, run 6 against base:
+
+| family | run 5 | run 6 | base |
+|---|---|---|---|
+| determinant | 1/150 | **0/150** | 54/150 |
+| eigenvalue | 1/90 | 2/90 | 2/90 |
+| matrix_power | 43/60 | 33/60 | 34/60 |
+| matrix_vector | 45/60 | **16/60** | 44/60 |
+| multiplication | 33/60 | 26/60 | 25/60 |
+| nullity | 15/60 | 20/60 | 19/60 |
+| rank | 21/60 | 21/60 | 21/60 |
+| trace | 56/60 | 52/60 | 58/60 |
+| transpose | 60/60 | 60/60 | 49/60 |
+
+The pattern in that table is the diagnosis: **transpose (100%) and trace
+(86.7%) held; the families that collapsed are the ones whose PROMPT varies
+most.** determinant went to zero while the base model — taught neither
+method — scored 36%.
+
+## RUN 7 — the fifth leg of the contract: the PROMPT SHAPE
+
+The answer contract has four legs (system prompt, closing instruction,
+answer shape, value domain). Run 6 matched all four and still lost 11.6
+points to its base model. The leg nobody had looked for is the **shape of
+the prompt**, and it turns out the benchmark sends three different ones.
+
+Measured directly against the released problem files:
+
+| leg | the benchmark | the corpus (runs 1–6) |
+|---|---|---|
+| task line | names the matrix | matched |
+| **method line** | "Use cofactor expansion along the first row." | **never produced** |
+| **closing line** | **two** different ones per family | **one of the two** |
+| **bare shape** | all 220 of the 4×4 problems: a matrix, no task, no closing line | **never produced** |
+
+### The method lines, verbatim, with the benchmark's own counts
+
+| subcategory | method line | at 3×3 |
+|---|---|---|
+| determinant | "Use cofactor expansion along the first row." | 18 of 50 |
+| eigenvalue | "Compute the characteristic polynomial det(A − λI) = 0 and solve for λ." | 24 of 30 |
+| rank | "Use row reduction to find the number of non-zero rows in row echelon form." | 14 of 20 |
+| nullity | "Recall: nullity = number of columns − rank." + "First find the rank using row reduction, then compute the nullity." | 16 of 20 |
+| multiplication | "Show your row-by-column computation steps clearly." | 12 of 20 |
+| matrix_power | "Multiply A by itself. Show all row-by-column steps." | 20 of 20 |
+| matrix_vector | "Compute each entry of b by taking the dot product of each row of A with x." | 20 of 20 |
+| trace | "The trace is the sum of the diagonal elements." | 14 of 20 |
+| transpose | "The transpose A^T is obtained by swapping rows and columns." | 20 of 20 |
+
+**None of them appear at 4×4 or 5×5** — the method line is a 3×3-only
+shape.
+
+### The closing lines: two per family
+
+| subcategory | variant A | variant B |
+|---|---|---|
+| determinant | 82× "Show all intermediate steps. Put your final numerical answer inside \boxed{}." | — (same closing, different method line) |
+| eigenvalue | 36× "Show all intermediate steps. Put your final numerical answer inside \boxed{}." | 24× "Show all steps. List all eigenvalues inside \boxed{}." |
+| matrix_power | 20× "Show all intermediate steps. Put your final numerical answer inside \boxed{}." | 20× "Put the final 3×3 result matrix inside \boxed{}." |
+| matrix_vector | 20× "Show all intermediate steps. Put your final numerical answer inside \boxed{}." | 20× "Show your steps. Put the final vector b inside \boxed{}." |
+| multiplication | 28× "Show all intermediate steps. Put your final numerical answer inside \boxed{}." | 12× "Put the final 3×3 result matrix inside \boxed{}." |
+| nullity | 24× "Show all intermediate steps. Put your final numerical answer inside \boxed{}." | 16× "Show your steps. Put your final numerical answer inside \boxed{}." |
+| rank | 26× "Show all intermediate steps. Put your final numerical answer inside \boxed{}." | 14× "Show your row operations. Put your final numerical answer inside \boxed{}." |
+| trace | 26× "Show all intermediate steps. Put your final numerical answer inside \boxed{}." | 14× "Show your steps. Put your final numerical answer inside \boxed{}." |
+| transpose | 20× "Show all intermediate steps. Put your final numerical answer inside \boxed{}." | 20× "Write out A^T explicitly. Put the final matrix inside \boxed{}." |
+
+Plus the third shape: the bare one, 20 of every 60 problems per family,
+which is the whole 4×4 file.
+
+### Why this is the regression, not the mathematics
+
+The corpus taught cofactor expansion, row reduction, the characteristic
+polynomial, dot products — every method the benchmark names. **But it never
+put the request in the prompt.** So the model was taught "here is a
+determinant, use cofactors" and was then scored on "use cofactor expansion
+along the first row", and a fine-tuned model that had been narrowed onto one
+derivation answered a differently-shaped question with the shape it knew.
+The base model, which had never been narrowed, fell back on what it knew and
+scored 36% where the fine-tune scored 0.
+
+The evidence for "prompt, not mathematics":
+
+- The corpus's derivations were already correct. Measured: 14 of 14
+  cofactor-instructed problems use cofactors, 0 mismatches, 0 wrong answers.
+- The families that held (transpose 100%, trace 86.7%) are the ones whose
+  second variant differs least from the first.
+- The families that collapsed are the ones whose prompt varies most.
+- The corpus's *arithmetic* was never in doubt — `make check-arithmetic`
+  passes on 3,800 problems across 19 families.
+
+### What run 7 changed
+
+| change | where |
+|---|---|
+| every prompt tail the benchmark uses, verbatim, with its counts | `src/la/benchprompt_tails.py` (new) |
+| the tail is chosen per problem from the per-problem RNG | `src/la/augment.py` (`prompt_tail`) |
+| the prompt's method line **decides** the derivation | `src/la/problems.py` (`gen_determinant`) |
+| the VERIFY line recomputes instead of restating the answer | `src/la/problems.py` (3×3 expands along the first column; other sizes use the triangular form) |
+| the evaluator survives a malformed plot spec | `src/la/schema.py` (`spec_features`) |
+| the table is checked against the released files, line for line | `tests/test_tail_table_matches_benchmark.py` (new) |
+| the corpus produces each benchmark tail | `tests/test_closing_instruction_variants.py`, `tests/test_benchmark_instructions_in_corpus.py` (new) |
+| the 4×4 bare shape is in the corpus | `tests/test_prompt_shapes.py` (new) |
+
+`make contract-check` now checks all ten families against all three of
+their tails and reports the tail coverage per family.
+
+### The rerun procedure — every command names the adapter
+
+```bash
+git pull
+make contract-check                          # no GPU: the contract map must be clean
+rm -rf data                                  # run 6's corpus is still on disk
+make data                                    # ~3 min
+make check-arithmetic                        # no GPU
+make train ADAPTER=runs/vslm-run6            # ~182 min on one RTX 4070 SUPER
+make eval ADAPTER=runs/vslm-run6             # ~5 min
+make bench-all ADAPTER=runs/vslm-run6        # ~36 min adapter, ~95 min base
+```
+
+**`ADAPTER=runs/vslm-run6` on every scoring command.** The Makefile's
+default is the old `runs/vslm`, and the default wins — a `make bench-all`
+without it scores the wrong adapter. This is the same class of bug as the
+wrong-base-model one in run 5.
+
+### What is not yet measured
+
+No GPU ran in this session. Every check that does not need a GPU passes
+(191 tests, `make check` exit 0, `make contract-check` exit 0, the
+arithmetic check on 3,800 problems). **The run-7 score is still a
+projection.** The diagnosis for run 6 is measured; the fix for it is not
+yet scored.

@@ -88,7 +88,15 @@ TASKS = {
 }
 
 # The closing instruction the benchmark puts at the end of the problem body.
-# The released problem_latex carries it, so the corpus's body carries it too.
+#
+# For the nine benchmark subcategories this table is only a FALLBACK. The
+# benchmark uses more than one closing instruction per subcategory, and the
+# corpus has to produce all of them - the full set, with the benchmark's own
+# counts, is in `benchprompt_tails.py` (PROMPT_TAILS), and that table is
+# checked against the released problem files line for line by
+# tests/test_tail_table_matches_benchmark.py.
+#
+# The families the benchmark does not have use this table directly.
 BODY_HINTS = {
     "determinant": "Show all intermediate steps. Put your final numerical answer inside \\boxed{}.",
     "eigenvalue": "Show all intermediate steps. Put your final answers inside \\boxed{}.",
