@@ -1773,3 +1773,104 @@ make check-arithmetic  (3,800 problems)  every printed expression evaluates
 and it scored 306/660 with byte-identical per-family numbers in runs 6,
 7 and 8, so the harness is deterministic and the comparison is sound —
 but the score needs the user's GPU.
+
+---
+
+## THE RUN THAT WAS SUBMITTED — 259/660 = 39.2% (2026-11-21)
+
+**This run did NOT use the run-9 code.** The run-9 commit `10d0ab5` was
+never pushed, so `git pull` reported "Already up to date" and the run
+trained on commit `0f64ed5` — run 8's code.
+
+Three independent pieces of evidence, all from the log itself:
+
+1. **The contract-check output is the old one.** It ends "…system prompt,
+   closing instruction and answer shape". The run-9 version ends "…and
+   size mix" and prints a size table. There is no size table.
+2. **Corpus generation ran at 412/s** against run 8's 373/s — 10%, not the
+   20× (1,096 ms → 54 ms per eigenvalue problem) the run-9 code gives.
+3. **The size mix is run 8's.** Run 8's `_rank_problem`/`gen_determinant`
+   draw from `[2, 2, 3, 3, 4, 4, 5, 5]`, so its corpus carries 2×2 and
+   under-teaches 5×5 — measured directly from `0f64ed5`:
+   determinant {2:24, 3:33, 4:42, 5:51}, eigenvalue {2:53, 3:59, 4:22, 5:16}.
+
+### What it measured
+
+| | run 8 (250) | this run (259) | base (306) |
+|---|---|---|---|
+| overall | 37.9% | **39.2%** | 46.4% |
+| 3×3 | 103/220 (46.8%) | 97/220 (44.1%) | 165/220 (75.0%) |
+| 4×4 | 96/220 (43.6%) | 95/220 (43.2%) | 92/220 (41.8%) |
+| 5×5 | 51/220 (23.2%) | **67/220 (30.5%)** | 49/220 (22.3%) |
+
+Per family:
+
+| family | run 7 | run 8 | this run | base |
+|---|---|---|---|---|
+| determinant | 4/150 | 1/150 | **4/150** | 54/150 |
+| eigenvalue | 5/90 | 4/90 | 4/90 | 2/90 |
+| matrix_power | 40/60 | 39/60 | **41/60** | 34/60 |
+| matrix_vector | 37/60 | 17/60 | 18/60 | 44/60 |
+| multiplication | 33/60 | 28/60 | **33/60** | 25/60 |
+| nullity | 19/60 | 17/60 | **14/60** | 19/60 |
+| rank | 29/60 | 27/60 | 26/60 | 21/60 |
+| trace | 56/60 | 59/60 | 59/60 | 58/60 |
+| transpose | 59/60 | 58/60 | **60/60** | 49/60 |
+
+Without the determinant, the subtraction diagnostic:
+
+    this run  255/510 = 50.0%
+    base      252/510 = 49.4%
+
+**The fine-tune now beats the base model on everything except the
+determinant**, and by one problem. The determinant is still the entire
+deficit: 4/150 against the base's 54/150.
+
+### The loss curve is IDENTICAL to run 8's
+
+| step | run 7 | run 8 | this run |
+|---|---|---|---|
+| 200 | 0.0542 | 0.0692 | 0.0687 |
+| 400 | 0.0536 | 0.0784 | 0.0790 |
+| 600 | 0.0425 | 0.0553 | 0.0543 |
+| 800 | 0.0448 | 0.0591 | 0.0593 |
+| 1000 | 0.0374 | 0.0597 | 0.0598 |
+
+Same code, same corpus, so the loss should match — and it does, to within
+0.0005 at every step. **This confirms the run really did use run 8's
+code.**
+
+### The 5×5 gain is the interesting part
+
+5×5 went **51 → 67 (+16 problems, 23.2% → 30.5%)** and the fine-tune
+now beats the base model on 5×5 by 8.2 points — the first time any
+fine-tune has beaten the base on that column. 4×4 also beats the base
+(+1.4).
+
+So the two columns where the corpus under-taught 5×5 are exactly the two
+that improved, and the 3×3 — where the corpus spent 2×2 rows — lost 6.
+
+### The lessons
+
+1. **Verify that the push landed BEFORE the run.** `git pull` saying
+   "Already up to date" means the local branch matched the remote — it
+   does not mean the remote has your work. Check
+   `git log --oneline -1` after the pull, or put the commit SHA in the
+   log banner.
+2. **The corpus's size mix belongs in the contract, and the contract
+   check should print it.** The check that would have caught this is
+   exactly the size-mix table run 9 added.
+3. **A run's own log can tell you which code ran.** The contract-check
+   banner, the generation rate, and the corpus's size mix are all
+   fingerprints. Three of them agreed.
+4. **The 3×3 and 5×5 columns move in opposite directions when the size
+   mix changes.** The next run must decide which size it is buying, and
+   say so.
+
+### The run-10 target
+
+The determinant is still 4/150 against the base's 54/150, and removing it
+gives 255/510 = 50.0% against the base's 252/510 = 49.4%. **The fine-tune
+is one problem ahead of the base on every other family.** Everything now
+turns on one family, and run 10 should touch the determinant and nothing
+else — including the size mix, which must now stay uniform.
