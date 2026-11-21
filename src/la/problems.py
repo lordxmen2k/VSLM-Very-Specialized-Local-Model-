@@ -36,6 +36,7 @@ import sympy as sp
 from .answer import fmt_matrix, fmt_pairs, fmt_scalar, fmt_set
 from .augment import (paraphrase, permute_rows, prompt_tail, question,
                       similarity_transform)
+from .benchprompt_magnitudes import draw_entry
 
 sp.Matrix  # noqa: B018  (keep the import used)
 
@@ -402,8 +403,22 @@ def _eliminate(A):
 
 
 def _rand_int_matrix(rng: random.Random, n: int, m: int | None = None,
-                     lo: int = -3, hi: int = 4) -> sp.Matrix:
+                     lo: int = -3, hi: int = 4,
+                     family: str = "", size: str = "") -> sp.Matrix:
+    """A random integer matrix.
+
+    When `family` is given, the entries are drawn with that family's
+    BENCHMARK ENTRY SHAPE instead of uniformly from [lo, hi]: mostly
+    small entries, occasionally a large one, at the benchmark's own
+    proportions. The corpus used to draw everything from [-4, 5], which
+    is the benchmark's small end with none of its tail - see
+    benchprompt_magnitudes.py for why that cost the determinant family
+    50 of its 150 problems.
+    """
     m = m or n
+    if family:
+        return sp.Matrix(n, m,
+                         lambda i, j: draw_entry(rng, family, size))
     return sp.Matrix(n, m, lambda i, j: rng.randint(lo, hi))
 
 
@@ -496,15 +511,28 @@ def _rational_orthogonal(rng: random.Random, n: int) -> sp.Matrix:
 
 
 def _pick_eigenvalues(rng: random.Random, n: int, allow_complex: bool) -> list[Any]:
+    """The eigenvalues the constructed matrix will have.
+
+    The eigenvalues are drawn from the benchmark's own spread. The corpus
+    used [-3, 5], which produced matrices whose entries never exceeded 5
+    and whose eigenvalues were always small; the benchmark's 3x3
+    eigenvalue matrices reach entries of 240 and eigenvalues of 1120, and
+    its 4x4 matrices reach entries of 1120. A model trained only on the
+    small end has never computed a characteristic polynomial with a large
+    coefficient in it.
+
+    The eigenvalues stay integral, so the spectrum stays exact and the
+    corpus does not have to teach rounding to get a large number.
+    """
     out: list[Any] = []
     i = 0
     while i < n:
         if allow_complex and n - i >= 2 and rng.random() < 0.45:
-            a, b = rng.randint(-3, 3), rng.randint(1, 3)
+            a, b = rng.randint(-9, 9), rng.randint(1, 9)
             out += [a + b * sp.I, a - b * sp.I]
             i += 2
             continue
-        out.append(sp.Integer(rng.randint(-3, 5)))
+        out.append(sp.Integer(rng.randint(-9, 9)))
         i += 1
     return out
 
@@ -547,7 +575,7 @@ def gen_determinant(rng: random.Random) -> Problem | None:
     # 5x5 is in the mix on purpose: it is where frontier models stop
     # computing, so the model has to have seen it.
     n = rng.choice([2, 2, 3, 3, 4, 4, 5, 5])
-    A = _rand_int_matrix(rng, n, None, -4, 5)
+    A = _rand_int_matrix(rng, n, None, family="determinant", size=f"{n}x{n}")
     A = _permute_rows_only(rng, A)
     det = sp.simplify(A.det())
     if det == 0:
@@ -768,15 +796,109 @@ def gen_solve_system(rng: random.Random) -> Problem | None:
                    spec, 1 if n == 2 else (3 if n == 3 else 4), ["exact", "vector"], stem=stem)
 
 
+def _large_entry_eigenvalue_matrix(rng: random.Random, n: int) -> sp.Matrix | None:
+    """A matrix with LARGE entries and SMALL, SIMPLE eigenvalues.
+
+    The benchmark's eigenvalue matrices are not the small block-triangular
+    ones the corpus builds. 23 per cent of them have an entry above 20,
+    with the largest at 1120 - and those are the ones with a REPEATED or
+    ZERO eigenvalue:
+
+        [[ 68, 129,  96],         eigenvalues 2, -4, 4
+         [  0,   2,   0],
+         [-48, -94, -68]]
+
+        [[-88,  96, -40],         eigenvalues 0, 0, 4
+         [-176, 192, -80],
+         [-220, 240,-100]]
+
+    A rank-deficient matrix has large entries and small eigenvalues at the
+    same time, because the large entries cancel.
+
+    The eigenvalues have to stay SIMPLE. A random large matrix's
+    characteristic polynomial is irreducible and its roots come out as
+    cubic-root expressions - the benchmark's references are all small
+    numbers, and a corpus that teaches cube roots teaches the wrong
+    arithmetic.
+
+    So the matrix is built by CONSTRUCTION: S D S^-1 with S an integer
+    unimodular matrix and D diagonal with the chosen small eigenvalues.
+    The similarity leaves the spectrum exactly alone while the entries
+    grow, and S^-1 is integral because S has determinant 1, so the result
+    is an integer matrix. Scaling by an integer factor then pushes the
+    entries out to the benchmark's magnitudes.
+
+    The derivation still has to COMPUTE the characteristic polynomial, so
+    the model is not handed the eigenvalues.
+    """
+    if n < 2:
+        return None
+    eigs = _pick_eigenvalues(rng, n, allow_complex=False)
+    S = _unimodular(rng, n)
+    D = sp.diag(*[sp.Integer(e) for e in eigs])
+    A = S * D * S.inv()
+    # scale up so the entries are large, as the benchmark's are
+    k = rng.choice([6, 8, 12, 20])
+    A = sp.Matrix(n, n, lambda i, j: int(A[i, j]) * k)
+    return A
+
+
+def _unimodular(rng: random.Random, n: int) -> sp.Matrix:
+    """An integer matrix with determinant 1, so its inverse is integral."""
+    while True:
+        S = sp.Matrix(n, n, lambda i, j: rng.randint(-2, 2))
+        if S.det() == 1:
+            return S
+
+
+def _exact_eigenvalues(A, actual) -> list[Any]:
+    """The eigenvalues of an integer matrix, exactly and cheaply.
+
+    sympy's eigenvals() returns exact expressions, but simplify() on the
+    ones from a large-entry matrix takes seconds. The rational root
+    theorem gives them in closed form instead: the eigenvalues are the
+    rational roots of the characteristic polynomial, and an integer
+    matrix with a zero row has a zero eigenvalue.
+
+    Returns the eigenvalues sorted by magnitude, which is the order the
+    answer and the plot both use.
+    """
+    cp = A.charpoly()
+    coeffs = [sp.Integer(c) for c in cp.all_coeffs()]
+    found = list(sp.polys.polytools.ground_roots(
+        sp.Poly(coeffs, cp.gen, domain=sp.ZZ)))
+    # any eigenvalue the rational root theorem could not find
+    if len(found) != len(coeffs) - 1:
+        for v in actual:
+            if not any(v - f == 0 for f in found):
+                found.append(v)
+    if len(found) != len(coeffs) - 1:
+        return []
+    found.sort(key=lambda v: (abs(complex(sp.N(v))), str(v)))
+    return found
+
+
 def gen_eigenvalue(rng: random.Random) -> Problem | None:
     n = rng.choice([2, 2, 3, 3, 4, 5])
     allow_c = n == 2 and rng.random() < 0.4
-    eigs = _pick_eigenvalues(rng, n, allow_c)
-    A = sp.Matrix(_matrix_with_eigenvalues(rng, eigs))
-    A = similarity_transform(rng, A)
+    # One problem in four is a large-entry, rank-deficient matrix: that
+    # is the shape 23 per cent of the benchmark's eigenvalue matrices have
+    # and the corpus never produced.
+    if rng.random() < 0.25:
+        A = _large_entry_eigenvalue_matrix(rng, n)
+        if A is None:
+            return None
+    else:
+        eigs = _pick_eigenvalues(rng, n, allow_c)
+        A = sp.Matrix(_matrix_with_eigenvalues(rng, eigs))
+        A = similarity_transform(rng, A)
     actual = A.eigenvals()
-    vals = [sp.simplify(v) for v in actual]
-    if len(set(map(str, vals))) != n:
+    # sp.simplify on the eigenvalues of a large-entry matrix takes two
+    # seconds and the corpus does not need it: the eigenvalues of an
+    # integer matrix are already exact, and the rational root theorem
+    # gives them in closed form from the characteristic polynomial.
+    vals = _exact_eigenvalues(A, actual)
+    if len(vals) != n:
         return None
     stem = f"A = {fmt_matrix(A)}"
     q = question("eigenvalue", _tail(rng, "eigenvalue"), paraphrase("eigenvalue", rng, f"{n}x{n}"), stem)
@@ -796,8 +918,11 @@ def gen_eigenvalue(rng: random.Random) -> Problem | None:
     # zero. One shape, the same shape as the answer.
     pts = []
     for v in vals:
-        r, i = sp.re(v), sp.im(v)
-        pts.append([float(r), float(i)])
+        # sympy keeps a real number as a complex expression internally,
+        # and float() refuses those. Python's complex() accepts both a
+        # real and a complex sympy value and always gives real parts.
+        c = complex(sp.N(sp.expand(v)))
+        pts.append([c.real, c.imag])
     spec = {"kind": "eigenvalue_spectrum",
             "data": {"values": [_spectrum_point(v) for v in vals]},
             "labels": {"x": "Re(λ)", "y": "Im(λ)",
@@ -815,11 +940,16 @@ def _spectrum_point(v):
     A real eigenvalue is a plain number and a complex one is a [re, im]
     pair, so the plot's shape always matches the answer's shape for a real
     spectrum. The renderer accepts both.
+
+    sympy keeps a real number as a complex expression internally, so
+    float() refuses it. Python's complex() accepts both a real and a
+    complex sympy value and always gives real parts.
     """
     v = sp.nsimplify(v)
     if v.is_real:
-        return float(v)
-    return [float(sp.re(v)), float(sp.im(v))]
+        return float(complex(sp.N(v)).real)
+    c = complex(sp.N(v))
+    return [c.real, c.imag]
 
 
 def _real_eigenvalues(A):
@@ -890,7 +1020,7 @@ def gen_eigenvalue_numeric(rng: random.Random) -> Problem | None:
     teaches exact integers never shows the model a value it has to round.
     """
     n = rng.choice([3, 3, 4, 4, 5])
-    A = _rand_int_matrix(rng, n, None, -3, 4)
+    A = _rand_int_matrix(rng, n, None, family="eigenvalue_numeric", size=f"{n}x{n}")
     vals = _real_eigenvalues(A)
     if vals is None or len(vals) != n:
         return None
@@ -1230,19 +1360,47 @@ def gen_condition_number(rng: random.Random) -> Problem | None:
                    spec, 4, ["exact", "scalar"], stem=stem)
 
 
-def _rank_problem(rng: random.Random):
+def _rank_problem(rng: random.Random, family: str = "rank", n: int = 3):
     """A matrix of known rank and the reduction that shows it."""
-    # n is fixed at 3 so the null space can be drawn in three dimensions
-    n = 3
     r = rng.randint(1, n - 1)
+    # The benchmark's rank and nullity matrices have entries well outside
+    # the [-3, 4] the corpus used to draw from: at 3x3 the median |entry|
+    # is 12 for nullity and 6 for rank, and they reach 24 and 18. A
+    # reduction that never sees a large entry is a reduction on a matrix
+    # the model will never be asked about.
     A = sp.zeros(n, n)
     for i in range(r):
         for j in range(n):
-            A[i, j] = rng.randint(-3, 4)
+            A[i, j] = draw_entry(rng, family, f"{n}x{n}")
     # permute before the rank is worked out, so the answer describes the
     # matrix the question actually shows
     A = _permute_rows_only(rng, A)
     return A, r
+
+
+def _rank_plot(A, r, ns):
+    """The plot for a rank or nullity problem.
+
+    At 3x3 the null space is drawn in three dimensions, which is what the
+    basis_3d figure is for. At 4x4 and 5x5 the null space has four or five
+    dimensions and cannot be drawn, so the echelon form is shown instead -
+    the echelon form is the thing the derivation reduces to, and the
+    number of pivot rows in it IS the rank.
+    """
+    n = A.rows
+    if n == 3:
+        return {"kind": "basis_3d",
+                "data": {"vectors": [[float(v[i, 0]) for i in range(v.rows)]
+                                     for v in ns]},
+                "labels": {**{f"v{i}": f"n{i+1}" for i in range(len(ns))},
+                           "title": "a basis of the null space"},
+                "annotate": []}
+    echelon, _ops = _row_reduction_steps(A)
+    return {"kind": "row_echelon",
+            "data": {"matrix": _mat(A), "echelon": _mat(echelon)},
+            "labels": {"left": "A", "right": "row echelon form",
+                       "title": f"the echelon form has {r} pivot rows"},
+            "annotate": []}
 
 
 def _rank_derivation(A, r):
@@ -1267,7 +1425,12 @@ def _rank_derivation(A, r):
 
 def gen_rank(rng: random.Random) -> Problem | None:
     """The rank of a matrix, answered with one integer."""
-    A, r = _rank_problem(rng)
+    # The benchmark scores rank at 3x3, 4x4 and 5x5, so the corpus has to
+    # teach the reduction at all three sizes. The plot changes with the
+    # size because a null space of four or five dimensions cannot be
+    # drawn in three.
+    n = rng.choice([3, 3, 4, 5])
+    A, r = _rank_problem(rng, "rank", n)
     n = A.rows
     stem = f"A = {fmt_matrix(A)}"
     q = question("rank", _tail(rng, "rank"), paraphrase("rank", rng, f"{n}x{n}"), stem)
@@ -1276,12 +1439,7 @@ def gen_rank(rng: random.Random) -> Problem | None:
     steps.append(step(f"VERIFY the number of pivot rows is {r}. OK"))
     scratch = "\n".join(steps)
     ns = A.nullspace()
-    spec = {"kind": "basis_3d",
-            "data": {"vectors": [[float(v[i, 0]) for i in range(v.rows)]
-                                 for v in ns]},
-            "labels": {**{f"v{i}": f"n{i+1}" for i in range(len(ns))},
-                       "title": "a basis of the null space"},
-            "annotate": []}
+    spec = _rank_plot(A, r, ns)
     return Problem("rank", q, scratch, fmt_scalar(sp.Integer(r)),
                    fmt_scalar(sp.Integer(r)), spec, 3,
                    ["exact", "scalar"], stem=stem)
@@ -1289,7 +1447,8 @@ def gen_rank(rng: random.Random) -> Problem | None:
 
 def gen_nullity(rng: random.Random) -> Problem | None:
     """The nullity of a matrix, answered with one integer."""
-    A, r = _rank_problem(rng)
+    n = rng.choice([3, 3, 4, 5])
+    A, r = _rank_problem(rng, "nullity", n)
     n = A.rows
     nullity = n - r
     stem = f"A = {fmt_matrix(A)}"
@@ -1301,12 +1460,7 @@ def gen_nullity(rng: random.Random) -> Problem | None:
                       f"the echelon form is {nullity}. OK"))
     scratch = "\n".join(steps)
     ns = A.nullspace()
-    spec = {"kind": "basis_3d",
-            "data": {"vectors": [[float(v[i, 0]) for i in range(v.rows)]
-                                 for v in ns]},
-            "labels": {**{f"v{i}": f"n{i+1}" for i in range(len(ns))},
-                       "title": "a basis of the null space"},
-            "annotate": []}
+    spec = _rank_plot(A, r, ns)
     return Problem("nullity", q, scratch, fmt_scalar(sp.Integer(nullity)),
                    fmt_scalar(sp.Integer(nullity)), spec, 3,
                    ["exact", "scalar"], stem=stem)
@@ -1351,7 +1505,7 @@ def _heatmap_spec(A, title: str) -> dict:
 def gen_matrix_trace(rng: random.Random) -> Problem | None:
     """The trace of a matrix: the sum of the diagonal."""
     n = rng.choice([2, 3, 3, 4, 4, 5, 5])
-    A = _rand_int_matrix(rng, n, None, -4, 5)
+    A = _rand_int_matrix(rng, n, None, family="matrix_trace", size=f"{n}x{n}")
     tr = sp.simplify(sp.trace(A))
     stem = f"A = {fmt_matrix(A)}"
     q = question("matrix_trace", _tail(rng, "matrix_trace"), paraphrase("matrix_trace", rng, f"{n}x{n}"), stem)
@@ -1367,7 +1521,7 @@ def gen_matrix_trace(rng: random.Random) -> Problem | None:
 def gen_matrix_transpose(rng: random.Random) -> Problem | None:
     """The transpose of a matrix."""
     n = rng.choice([2, 3, 3, 4, 5])
-    A = _rand_int_matrix(rng, n, None, -4, 5)
+    A = _rand_int_matrix(rng, n, None, family="matrix_transpose", size=f"{n}x{n}")
     At = A.T
     stem = f"A = {fmt_matrix(A)}"
     q = question("matrix_transpose", _tail(rng, "matrix_transpose"), paraphrase("matrix_transpose", rng, f"{n}x{n}"), stem)
@@ -1385,8 +1539,8 @@ def gen_matrix_multiply(rng: random.Random) -> Problem | None:
     # no 5x5 here: a full product at that size is 25 dot products, which
     # does not fit the sequence cap. The determinant keeps its 5x5.
     n = rng.choice([2, 3, 3, 4, 4])
-    A = _rand_int_matrix(rng, n, None, -3, 4)
-    B = _rand_int_matrix(rng, n, None, -3, 4)
+    A = _rand_int_matrix(rng, n, None, family="matrix_multiply", size=f"{n}x{n}")
+    B = _rand_int_matrix(rng, n, None, family="matrix_multiply", size=f"{n}x{n}")
     AB = sp.Matrix(A * B)
     stem = f"A = {fmt_matrix(A)}\n\nB = {fmt_matrix(B)}"
     q = question("matrix_multiply", _tail(rng, "matrix_multiply"), paraphrase("matrix_multiply", rng, f"{n}x{n}"), stem)
@@ -1411,7 +1565,7 @@ def gen_matrix_multiply(rng: random.Random) -> Problem | None:
 def gen_matrix_power(rng: random.Random) -> Problem | None:
     """A small integer power of a matrix."""
     n = rng.choice([2, 3, 3, 4])
-    A = _rand_int_matrix(rng, n, None, -2, 3)
+    A = _rand_int_matrix(rng, n, None, family="matrix_power", size=f"{n}x{n}")
     # A cubed needs two full matrix products, which is twice the text, so
     # it is kept to the small sizes. LinAlg-Bench only asks for A^2 anyway.
     k = rng.choice([2, 3]) if n <= 3 else 2
@@ -1450,8 +1604,8 @@ def gen_matrix_power(rng: random.Random) -> Problem | None:
 def gen_matrix_vector(rng: random.Random) -> Problem | None:
     """A matrix times a vector."""
     n = rng.choice([2, 3, 3, 4, 4, 5])
-    A = _rand_int_matrix(rng, n, None, -3, 4)
-    v = sp.Matrix(n, 1, lambda i, j: rng.randint(-4, 5))
+    A = _rand_int_matrix(rng, n, None, family="matrix_vector", size=f"{n}x{n}")
+    v = sp.Matrix(n, 1, lambda i, j: draw_entry(rng, "matrix_vector", f"{n}x{n}"))
     Av = sp.Matrix(A * v)
     stem = f"A = {fmt_matrix(A)}\n\nx = {fmt_matrix(v)}"
     q = question("matrix_vector", _tail(rng, "matrix_vector"), paraphrase("matrix_vector", rng, f"{n}x{n}"), stem)
