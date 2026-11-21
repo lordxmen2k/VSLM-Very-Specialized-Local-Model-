@@ -233,8 +233,79 @@ distribution — mostly small, with the benchmark's tail of large ones — and
 generates rank and nullity at 4×4 and 5×5, which the benchmark scores and
 the corpus never produced.
 
+**Run 8's score was 250/660 = 37.9% — a regression, and an instructive
+one.** The magnitude fix *worked*: the determinant's cofactor term's median
+went from 18 to 70, right onto the benchmark's 60. And the determinant
+score went 4 → 1 anyway.
+
+The reason is visible in the training loss, which is the early warning
+that arrives three hours before the benchmark does:
+
+| | loss @ step 200 | loss @ step 400 | score |
+|---|---|---|---|
+| run 7 | 0.0542 | 0.0536 | 42.7% |
+| run 8 | 0.0692 | 0.0784 | 37.9% |
+
+Run 8 changed three things at once — the magnitudes, the rank/nullity
+sizes, and the RNG consumption — and the corpus got *harder* on every
+axis. A 5×5 row reduction is more than twice the work of a 3×3, so the
+families whose corpus got harder lost points, and the one family whose
+corpus did not change (`trace`) gained them.
+
+**Matching the benchmark's magnitudes is necessary, not sufficient.** The
+question is not "does the corpus contain the benchmark's range" but "does
+the model get *more right* overall".
+
 `make contract-check` prints the whole map and fails on a mismatch, without
 a GPU. It now checks all ten families against all three of their tails.
+
+### Run 9 — the size mix, the sixth leg
+
+Measuring every matrix in the released benchmark files against the corpus's
+generated data turned up a contract leg that had never been checked: **the
+size mix**.
+
+The benchmark's size mix is *exactly uniform* for every family, and there
+is not one 2×2 matrix anywhere in all 660 problems:
+
+| subcategory | benchmark | the corpus was teaching |
+|---|---|---|
+| determinant | 3×3:50 4×4:50 5×5:50 | 2×2:34 3×3:49 4×4:53 5×5:64 |
+| eigenvalue | 3×3:30 4×4:30 5×5:30 | 2×2:80 3×3:75 4×4:27 5×5:18 |
+| matrix_vector | 3×3:20 4×4:20 5×5:20 | 2×2:33 3×3:65 4×4:69 5×5:33 |
+| multiplication | 3×3:40 4×4:40 5×5:40 | 2×2:43 3×3:81 4×4:76 |
+| rank | 3×3:20 4×4:20 5×5:20 | 3×3:89 4×4:46 5×5:65 |
+
+**Between 10 and 40 per cent of the corpus taught 2×2 problems the
+benchmark never scores.** Those are rows *not* spent on 5×5 — and a 5×5
+derivation is a different kind of task: more row operations, more
+arithmetic, more chances to slip. The corpus under-taught exactly the size
+where the benchmark's arithmetic is hardest, and the determinant family —
+where run 7 scored 4 against the base's 54 — is the family whose 5×5
+cofactor products reach 9,112.
+
+Run 9 also fixes what run 8 got wrong, and what run 8 got right:
+
+- the large-entry eigenvalue matrix is scaled so its largest entry *lands
+  on* a target from the benchmark's own per-size shape, instead of being
+  multiplied by a blind factor. Run 8's corpus reached 11,080 against the
+  benchmark's 1,120 — a 23× overshoot in the p90.
+- a matrix whose characteristic polynomial is irreducible is **rejected**,
+  not answered. sympy returns a `CRootOf` for it, the answer grammar
+  cannot read it, and the grader would fail on it.
+- the decimal eigenvalue family is built symmetric, because a random
+  integer matrix has a real spectrum only 2% of the time at 5×5 while the
+  benchmark's are all real.
+- generation is **20× faster**: `sp.nsimplify()` was running mpmath's PSLQ
+  on expressions that were already exact, 13.8 seconds of a 21.7 second
+  run. The eigenvalue generator went from 1,096 ms to 54 ms per problem.
+- each generator owns its random stream. Run 8 changed `draw_entry` to
+  consume two draws per entry where the old code consumed one, and that
+  rewrote 76% of the corpus — including every matrix in `matrix_vector`,
+  the family that lost 20 points.
+
+`tests/test_size_mix.py` and `tests/test_corpus_stability.py` pin all of
+it. Both fail on run 8's code, with the measured numbers in the message.
 
 ---
 

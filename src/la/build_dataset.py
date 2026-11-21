@@ -31,11 +31,28 @@ def _config_weights() -> dict[str, int]:
     return dict((config.get("data") or {}).get("family_weights") or {})
 
 
+def _rng_for(seed: int, index: int) -> random.Random:
+    """The random stream for one corpus position.
+
+    Deterministic in (seed, index) and INDEPENDENT of everything else.
+    That independence is load-bearing: the builder interleaves the
+    families, so if one generator consumed a different number of draws
+    from its stream, every matrix after it in EVERY family would change.
+    Run 8 changed `draw_entry()` from one draw per entry to two, and
+    that silently rewrote 76% of the corpus - which made the run's
+    result unreadable.
+
+    Keep this in one place. A generator that reads from a shared stream
+    is a bug that no test on the output can see.
+    """
+    return random.Random((seed * 1_000_003 + index) & 0xFFFFFFFF)
+
+
 def _make_one(args):
     """Build one problem. Deterministic in (seed, index)."""
     seed, index, families, schedule = args
     fam = schedule[index % len(schedule)] if schedule else families[index % len(families)]
-    rng = random.Random((seed * 1_000_003 + index) & 0xFFFFFFFF)
+    rng = _rng_for(seed, index)
     p = generate(fam, rng)
     return (index, p)
 

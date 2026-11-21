@@ -14,7 +14,9 @@ from __future__ import annotations
 import argparse
 import os
 import random
+import re
 import sys
+from collections import Counter
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
@@ -162,6 +164,10 @@ def main(argv=None) -> int:
             failures.append(f"{family}: expected a list answer, got "
                             f"{'/'.join(sorted(shapes))}")
 
+    # the SIZE MIX, which is the sixth leg of the contract
+    size_failures = _check_size_mix(families, args.n)
+    failures.extend(size_failures)
+
     print()
     if failures:
         print(f"CONTRACT MISMATCH: {len(failures)} problem(s)")
@@ -169,8 +175,86 @@ def main(argv=None) -> int:
             print(f"  - {f}")
         return 1
     print("CONTRACT OK: every benchmark family matches the benchmark's "
-          "system prompt, closing instruction and answer shape.")
+          "system prompt, closing instruction, answer shape and size mix.")
     return 0
+
+
+def _matrix_size(text):
+    """The dimension of the first matrix in a problem's question."""
+    m = re.search(r"\\begin\{[bp]matrix\}(.*?)\\end\{[bp]matrix\}", text, re.S)
+    if not m:
+        return None
+    rows = [ln for ln in m.group(1).split("\\\\") if ln.strip()]
+    return len(rows) if rows else None
+
+
+def _benchmark_sizes(subcat):
+    """The dimension of every matrix the benchmark scores for a subcat."""
+    import csv
+    cache = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                         "tests", "_cache")
+    out = []
+    for size in ("3x3", "4x4", "5x5"):
+        path = os.path.join(cache, f"linalg_bench_{size}.csv")
+        if not os.path.exists(path):
+            continue
+        with open(path, newline="", encoding="utf-8") as fh:
+            for row in csv.DictReader(fh):
+                if row["Subcat"] != subcat:
+                    continue
+                for m in re.finditer(
+                        r"[A-Z](?:_\{[A-Z]+\})? = \\begin\{[bp]matrix\}(.*?)"
+                        r"\\end\{[bp]matrix\}", row["problem_latex"], re.S):
+                    body = m.group(1)
+                    rows = [ln for ln in body.split("\\\\") if ln.strip()]
+                    if rows:
+                        out.append(len(rows))
+    return out
+
+
+def _check_size_mix(families, n):
+    """The corpus's size mix must be the benchmark's.
+
+    The benchmark's mix is exactly uniform for every family, and there is
+    not one 2x2 matrix anywhere in all 660 problems. The corpus used to
+    teach 2x2 - between 10 and 40 per cent of its rows - which are rows
+    NOT spent on the 5x5 problems the benchmark does score.
+    """
+    failures = []
+    print()
+    print(f"{'family':<20} {'benchmark sizes':<22} {'corpus sizes':<22}")
+    for family in families:
+        subcat = FAMILY_TO_SUBCAT[family]
+        bench = _benchmark_sizes(subcat)
+        if not bench:
+            continue
+        rng = random.Random(20261117)
+        got = []
+        for _ in range(n):
+            p = generate(family, rng)
+            if p is None:
+                continue
+            s = _matrix_size(p.question)
+            if s:
+                got.append(s)
+        if not got:
+            continue
+        b = sorted(Counter(bench).items())
+        c = sorted(Counter(got).items())
+        btxt = " ".join(f"{k}:{v}" for k, v in b)
+        ctxt = " ".join(f"{k}:{v}" for k, v in c)
+        print(f"{family:<20} {btxt:<22} {ctxt:<22}")
+        off = [s for s in got if s not in set(bench)]
+        if off:
+            failures.append(f"{family}: {len(off)} of {len(got)} matrices are a "
+                            f"size the benchmark never scores "
+                            f"({sorted(set(off))})")
+        missing = set(bench) - set(got)
+        if missing:
+            failures.append(f"{family}: the corpus never generates a "
+                            f"{sorted(missing)} matrix, but the benchmark "
+                            f"scores them")
+    return failures
 
 
 if __name__ == "__main__":

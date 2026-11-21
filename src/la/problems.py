@@ -33,7 +33,7 @@ from typing import Any, Callable
 import numpy as np
 import sympy as sp
 
-from .answer import fmt_matrix, fmt_pairs, fmt_scalar, fmt_set
+from .answer import _exactify, fmt_matrix, fmt_pairs, fmt_scalar, fmt_set
 from .augment import (paraphrase, permute_rows, prompt_tail, question,
                       similarity_transform)
 from .benchprompt_magnitudes import draw_entry
@@ -236,6 +236,33 @@ def _dot_product(row, col) -> str:
         running.append(acc)
     return (f"{' + '.join(terms)} = {_fmt_sum(products)}"
             f" = {fmt_scalar(total)}")
+
+
+def _dot_product_compact(row, col) -> str:
+    """A dot product with the PARTIAL SUMS kept and the terms dropped.
+
+    "1*(-4) + 2*3 + ... = -4 + 6 - 8 = -6"
+
+    The partial sums are the part that matters and they are kept: the run
+    with the sums removed scored 27 per cent on matrix multiplication and
+    0 per cent on matrix powers, and the failures were exactly the long
+    dot products. The PRODUCT LIST is the part that costs the tokens,
+    and at 5x5 the twenty-five entries' worth of them pushed the example
+    to 1718 tokens against a 1536 cap - a truncated example loses the end
+    of its completion, which is where the plot spec is.
+
+    The arithmetic checker validates the terms, so a compact line is
+    checked as a whole rather than term by term; that is the trade, and
+    it is taken only at the sizes where the cap forces it.
+    """
+    products = [_exact(a * b) for a, b in zip(row, col)]
+    total = _exact(sum(products))
+    running = []
+    acc = sp.Integer(0)
+    for prod in products:
+        acc = _exact(acc + prod)
+        running.append(acc)
+    return f"= {_fmt_sum(products)} = {fmt_scalar(total)}"
 
 
 def _doolittle(A):
@@ -510,6 +537,46 @@ def _rational_orthogonal(rng: random.Random, n: int) -> sp.Matrix:
     return sp.eye(n)
 
 
+# How many times a generator may redraw its matrix size before giving up.
+# A generator that rejects a matrix - because its spectrum is not
+# rational, say - must redraw the SIZE as well, or the accepted corpus
+# ends up with a size mix that reflects the rejection rate rather than
+# the benchmark's.
+_SIZE_REDRAWS = 12
+
+
+def _bench_size(rng: random.Random) -> int:
+    """A matrix size drawn the way the benchmark draws them.
+
+    The released benchmark has an EXACTLY UNIFORM size mix for every
+    family - 50/50/50 for the determinants, 30/30/30 for the
+    eigenvalues, 20/20/20 for most of the rest - and it contains no 2x2
+    matrix anywhere. All 660 problems are 3x3, 4x4 or 5x5.
+
+    The corpus used to draw its own mix, and it was badly skewed:
+
+        determinant     2x2:34  3x3:49  4x4:53  5x5:64
+        eigenvalue      2x2:80  3x3:75  4x4:27  5x5:18
+        matrix_power    2x2:43  3x3:102 4x4:55
+        multiplication  2x2:43  3x3:81  4x4:76
+
+    So between 10 and 40 per cent of the corpus taught 2x2 problems that
+    the benchmark never scores, and the 5x5 problems - a third of the
+    benchmark - were under-taught, worst of all for the eigenvalue
+    family.
+
+    That matters twice over. The rows spent on 2x2 are rows NOT spent on
+    5x5, and a 5x5 derivation is a different KIND of task: more row
+    operations, more arithmetic, more chances to slip. The corpus
+    under-taught exactly the size where the benchmark's arithmetic is
+    hardest.
+
+    Draw the size the benchmark's mix says, and only from the sizes the
+    benchmark scores.
+    """
+    return rng.choice([3, 4, 5])
+
+
 def _pick_eigenvalues(rng: random.Random, n: int, allow_complex: bool) -> list[Any]:
     """The eigenvalues the constructed matrix will have.
 
@@ -574,7 +641,7 @@ def _cofactor_at_3x3(A) -> bool:
 def gen_determinant(rng: random.Random) -> Problem | None:
     # 5x5 is in the mix on purpose: it is where frontier models stop
     # computing, so the model has to have seen it.
-    n = rng.choice([2, 2, 3, 3, 4, 4, 5, 5])
+    n = _bench_size(rng)
     A = _rand_int_matrix(rng, n, None, family="determinant", size=f"{n}x{n}")
     A = _permute_rows_only(rng, A)
     det = sp.simplify(A.det())
@@ -837,10 +904,82 @@ def _large_entry_eigenvalue_matrix(rng: random.Random, n: int) -> sp.Matrix | No
     S = _unimodular(rng, n)
     D = sp.diag(*[sp.Integer(e) for e in eigs])
     A = S * D * S.inv()
-    # scale up so the entries are large, as the benchmark's are
-    k = rng.choice([6, 8, 12, 20])
-    A = sp.Matrix(n, n, lambda i, j: int(A[i, j]) * k)
+    # Scale up so the entries are large, as the benchmark's are - but
+    # scale to a TARGET, not by a blind factor.
+    #
+    # Run 8 scaled by k in {6, 8, 12, 20} and never checked the result.
+    # |S D S^-1| is unbounded (S^-1's entries grow with n), so the
+    # product reached 11,080 against the benchmark's 1,120 - a 10x
+    # overshoot, and the corpus's p90 reached 276 against the
+    # benchmark's 12 - a 23x overshoot. The corpus trained arithmetic
+    # the benchmark never asks for, and the capacity it spent there
+    # came out of the common case: run 8 scored 250/660 = 37.9%
+    # against run 7's 282/660 = 42.7%.
+    #
+    # The fix is to pick the scale so the LARGEST ENTRY LANDS ON THE
+    # TARGET, never above it. Then the entries are large, in the
+    # benchmark's range, and the spectrum is untouched.
+    target = _large_entry_target(rng, n)
+    peak = max(abs(int(A[i, j])) for i in range(n) for j in range(n))
+    if peak == 0:
+        return None
+    # Scale so the largest entry LANDS ON the target.
+    #
+    # Two cases, and run 8 only handled the first:
+    #   peak < target  -> scale UP by an integer factor, so the matrix
+    #                     stays integral and the spectrum is untouched
+    #   peak > target  -> the base is ALREADY too big, and the factor
+    #                     must be a DIVISION. Run 8 used
+    #                     `max(1, target // peak)`, which silently
+    #                     clamped to 1 and left the matrix oversized.
+    #
+    # That clamp is why the corpus's 5x5 eigenvalue entries reached 616
+    # against the benchmark's largest 5x5 entry of 8.
+    if peak <= target:
+        k = max(1, round(target / peak))
+        A = sp.Matrix(n, n, lambda i, j: int(A[i, j]) * k)
+    else:
+        # scale DOWN: keep the entries integral by dividing by the peak
+        # and re-multiplying by the target, which preserves the spectrum
+        # (a scalar multiple) and lands the largest entry on the target
+        A = sp.Matrix(n, n, lambda i, j: round(int(A[i, j]) * target / peak))
+    # the result must respect the ceiling even after the integer maths
+    peak2 = max(abs(int(A[i, j])) for i in range(n) for j in range(n))
+    if peak2 > target:
+        A = sp.Matrix(n, n, lambda i, j: round(int(A[i, j]) * target / peak2))
     return A
+
+
+def _large_entry_target(rng: random.Random, n: int) -> int:
+    """The largest entry a large-entry eigenvalue matrix may reach.
+
+    The benchmark's eigenvalue entries are SIZE-DEPENDENT, which the flat
+    corpus distribution ignored:
+
+        benchmark  3x3  median 6  p90 80   max  240
+                    4x4  median 3  p90 20   max 1120
+                    5x5  median 3  p90  6   max    8
+
+    The 5x5 matrices are TINY - the benchmark's largest 5x5 eigenvalue
+    entry is 8. A flat distribution gave the corpus a 5x5 p90 of 32 and
+    a max of 616 against the benchmark's 8, so the corpus taught large
+    5x5 arithmetic the benchmark never asks for.
+
+    So the target comes from the benchmark's own per-size shape, and the
+    scale is chosen so the largest entry LANDS ON the target rather than
+    passing it.
+    """
+    from .benchprompt_magnitudes import entry_shape
+    _small, _heavy, large = entry_shape("eigenvalue", f"{n}x{n}")
+    ceiling = max(large, 4)
+    # Draw a target BELOW the ceiling, with a bias toward the smaller end
+    # so the corpus keeps a mixture - but sometimes exactly ON the
+    # ceiling, so the corpus REACHES the benchmark's range and not just
+    # its bulk. A corpus whose maximum is 116 against the benchmark's
+    # 1120 trains below the range it has to cover.
+    if rng.random() < 0.25:
+        return ceiling
+    return max(4, int(ceiling * rng.uniform(0.25, 1.0)))
 
 
 def _unimodular(rng: random.Random, n: int) -> sp.Matrix:
@@ -851,7 +990,7 @@ def _unimodular(rng: random.Random, n: int) -> sp.Matrix:
             return S
 
 
-def _exact_eigenvalues(A, actual) -> list[Any]:
+def _exact_eigenvalues(A) -> list[Any]:
     """The eigenvalues of an integer matrix, exactly and cheaply.
 
     sympy's eigenvals() returns exact expressions, but simplify() on the
@@ -867,11 +1006,22 @@ def _exact_eigenvalues(A, actual) -> list[Any]:
     coeffs = [sp.Integer(c) for c in cp.all_coeffs()]
     found = list(sp.polys.polytools.ground_roots(
         sp.Poly(coeffs, cp.gen, domain=sp.ZZ)))
-    # any eigenvalue the rational root theorem could not find
-    if len(found) != len(coeffs) - 1:
-        for v in actual:
-            if not any(v - f == 0 for f in found):
-                found.append(v)
+    # The rational root theorem did not find every eigenvalue, so this
+    # matrix has an IRREDUCIBLE characteristic polynomial.
+    #
+    # That is a matrix to REJECT, not to answer. sympy's eigenvals()
+    # returns a CRootOf object for it, and CRootOf is not a thing the
+    # answer grammar can read: the grader sees
+    # `CRootOf(x**5 + 2*x**4 + ...)` and fails. The corpus would then
+    # teach the model to write an answer that can never be scored.
+    #
+    # It is also the wrong arithmetic to teach. The benchmark's
+    # eigenvalue answers are all plain decimals:
+    #
+    #     lambda = -10.9074, 4.5753, 6.3321
+    #
+    # so a matrix whose roots have no rational closed form is not a
+    # matrix this benchmark asks about.
     if len(found) != len(coeffs) - 1:
         return []
     found.sort(key=lambda v: (abs(complex(sp.N(v))), str(v)))
@@ -879,12 +1029,39 @@ def _exact_eigenvalues(A, actual) -> list[Any]:
 
 
 def gen_eigenvalue(rng: random.Random) -> Problem | None:
-    n = rng.choice([2, 2, 3, 3, 4, 5])
-    allow_c = n == 2 and rng.random() < 0.4
+    # The size is drawn ONCE and then held while the matrix is redrawn.
+    #
+    # Drawing the size inside the retry loop was wrong: every rejected
+    # matrix consumed a fresh size draw, and since the acceptance rate
+    # is the same at every size (38 per cent), the accepted corpus
+    # inherited whatever the draw sequence happened to produce - 39 per
+    # cent 3x3, 36 per cent 4x4, 24 per cent 5x5 against the
+    # benchmark's uniform 30/30/30.
+    #
+    # With the size held, the accepted mix is the benchmark's.
+    n = _bench_size(rng)
+    for _ in range(_SIZE_REDRAWS):
+        p = _eigenvalue_at_size(rng, n)
+        if p is not None:
+            return p
+    return None
+
+
+def _eigenvalue_at_size(rng: random.Random, n: int) -> Problem | None:
+    allow_c = False
     # One problem in four is a large-entry, rank-deficient matrix: that
     # is the shape 23 per cent of the benchmark's eigenvalue matrices have
     # and the corpus never produced.
-    if rng.random() < 0.25:
+    #
+    # The rate is SIZE-DEPENDENT, because the benchmark's large-entry
+    # matrices are size-dependent too: its 3x3 eigenvalue entries reach
+    # 240 and its 4x4 reach 1120, but its 5x5 entries top out at 8. A
+    # flat rate gave the 4x4 corpus a p90 of 258 against the
+    # benchmark's 20 - the corpus teaching 4x4 arithmetic ten times
+    # harder than the benchmark asks for - while the 5x5 got entries the
+    # benchmark never uses.
+    large_rate = {3: 0.30, 4: 0.20, 5: 0.05}.get(n, 0.25)
+    if rng.random() < large_rate:
         A = _large_entry_eigenvalue_matrix(rng, n)
         if A is None:
             return None
@@ -892,12 +1069,11 @@ def gen_eigenvalue(rng: random.Random) -> Problem | None:
         eigs = _pick_eigenvalues(rng, n, allow_c)
         A = sp.Matrix(_matrix_with_eigenvalues(rng, eigs))
         A = similarity_transform(rng, A)
-    actual = A.eigenvals()
     # sp.simplify on the eigenvalues of a large-entry matrix takes two
     # seconds and the corpus does not need it: the eigenvalues of an
     # integer matrix are already exact, and the rational root theorem
     # gives them in closed form from the characteristic polynomial.
-    vals = _exact_eigenvalues(A, actual)
+    vals = _exact_eigenvalues(A)
     if len(vals) != n:
         return None
     stem = f"A = {fmt_matrix(A)}"
@@ -945,7 +1121,7 @@ def _spectrum_point(v):
     float() refuses it. Python's complex() accepts both a real and a
     complex sympy value and always gives real parts.
     """
-    v = sp.nsimplify(v)
+    v = _exactify(v)
     if v.is_real:
         return float(complex(sp.N(v)).real)
     c = complex(sp.N(v))
@@ -1019,8 +1195,69 @@ def gen_eigenvalue_numeric(rng: random.Random) -> Problem | None:
     56 of its 90 references are irrational decimals. A corpus that only
     teaches exact integers never shows the model a value it has to round.
     """
-    n = rng.choice([3, 3, 4, 4, 5])
-    A = _rand_int_matrix(rng, n, None, family="eigenvalue_numeric", size=f"{n}x{n}")
+    # As in gen_eigenvalue: the size is drawn once and held while the
+    # matrix is redrawn, so the accepted corpus carries the benchmark's
+    # uniform size mix rather than the mix that survives rejection.
+    n = _bench_size(rng)
+    for _ in range(_SIZE_REDRAWS):
+        p = _eigenvalue_numeric_at_size(rng, n)
+        if p is not None:
+            return p
+    return None
+
+
+def _symmetric_real_spectrum_matrix(rng: random.Random, n: int) -> sp.Matrix:
+    """An integer matrix with all-real, all-distinct eigenvalues.
+
+    A random integer matrix almost never has a real spectrum: at 5x5,
+    98 per cent of them have a complex conjugate pair. The benchmark's
+    eigenvalue matrices all have REAL spectra - all 90 of the benchmark's
+    answers are plain decimals with no complex unit - so a random matrix
+    is out of distribution and, worse, it is rejected so often that the
+    5x5 problems could not be generated at all.
+
+    A SYMMETRIC matrix has all-real eigenvalues, always. So the matrix is
+    built symmetric, with a random diagonal and a random non-zero
+    off-diagonal, and a similarity transform moves it away from the
+    banded shape so the model is not handed a tridiagonal.
+
+    The off-diagonal is non-zero so the eigenvalues are distinct rather
+    than the diagonal entries repeated, and the diagonal entries are
+    distinct for the same reason.
+    """
+    while True:
+        diag = rng.sample(range(-6, 8), n)
+        off = [rng.choice([-2, -1, 1, 2]) for _ in range(n - 1)]
+        A = sp.zeros(n)
+        for i in range(n):
+            A[i, i] = diag[i]
+        for i in range(n - 1):
+            A[i, i + 1] = off[i]
+            A[i + 1, i] = off[i]
+        # Scale so the ENTRIES sit in the benchmark's range: mostly small,
+        # with the benchmark's tail of large ones.
+        #
+        # Scaling the WHOLE matrix up was wrong: it moved the median to
+        # 29 at 3x3 and 80 at 4x4 against the benchmark's 6 and 3, so the
+        # corpus trained the common case at the hard case's magnitude.
+        # The benchmark's entries have a TAIL - mostly small with
+        # occasional large - and the corpus needs the same shape.
+        peak = max(abs(int(A[i, j])) for i in range(n) for j in range(n))
+        if peak == 0:
+            continue
+        from .benchprompt_magnitudes import entry_shape
+        _small, _heavy, large = entry_shape("eigenvalue_numeric", f"{n}x{n}")
+        # the target is the bulk's magnitude, so the bulk stays where the
+        # benchmark's bulk is; the tail comes from the similarity
+        # transform's own growth
+        target = max(peak, _small)
+        k = max(1, target // peak)
+        A = sp.Matrix(n, n, lambda i, j: int(A[i, j]) * k)
+        return similarity_transform(rng, A)
+
+
+def _eigenvalue_numeric_at_size(rng: random.Random, n: int) -> Problem | None:
+    A = _symmetric_real_spectrum_matrix(rng, n)
     vals = _real_eigenvalues(A)
     if vals is None or len(vals) != n:
         return None
@@ -1429,7 +1666,7 @@ def gen_rank(rng: random.Random) -> Problem | None:
     # teach the reduction at all three sizes. The plot changes with the
     # size because a null space of four or five dimensions cannot be
     # drawn in three.
-    n = rng.choice([3, 3, 4, 5])
+    n = _bench_size(rng)
     A, r = _rank_problem(rng, "rank", n)
     n = A.rows
     stem = f"A = {fmt_matrix(A)}"
@@ -1447,7 +1684,7 @@ def gen_rank(rng: random.Random) -> Problem | None:
 
 def gen_nullity(rng: random.Random) -> Problem | None:
     """The nullity of a matrix, answered with one integer."""
-    n = rng.choice([3, 3, 4, 5])
+    n = _bench_size(rng)
     A, r = _rank_problem(rng, "nullity", n)
     n = A.rows
     nullity = n - r
@@ -1504,7 +1741,7 @@ def _heatmap_spec(A, title: str) -> dict:
 
 def gen_matrix_trace(rng: random.Random) -> Problem | None:
     """The trace of a matrix: the sum of the diagonal."""
-    n = rng.choice([2, 3, 3, 4, 4, 5, 5])
+    n = _bench_size(rng)
     A = _rand_int_matrix(rng, n, None, family="matrix_trace", size=f"{n}x{n}")
     tr = sp.simplify(sp.trace(A))
     stem = f"A = {fmt_matrix(A)}"
@@ -1520,7 +1757,7 @@ def gen_matrix_trace(rng: random.Random) -> Problem | None:
 
 def gen_matrix_transpose(rng: random.Random) -> Problem | None:
     """The transpose of a matrix."""
-    n = rng.choice([2, 3, 3, 4, 5])
+    n = _bench_size(rng)
     A = _rand_int_matrix(rng, n, None, family="matrix_transpose", size=f"{n}x{n}")
     At = A.T
     stem = f"A = {fmt_matrix(A)}"
@@ -1536,9 +1773,7 @@ def gen_matrix_transpose(rng: random.Random) -> Problem | None:
 
 def gen_matrix_multiply(rng: random.Random) -> Problem | None:
     """The product of two matrices."""
-    # no 5x5 here: a full product at that size is 25 dot products, which
-    # does not fit the sequence cap. The determinant keeps its 5x5.
-    n = rng.choice([2, 3, 3, 4, 4])
+    n = _bench_size(rng)
     A = _rand_int_matrix(rng, n, None, family="matrix_multiply", size=f"{n}x{n}")
     B = _rand_int_matrix(rng, n, None, family="matrix_multiply", size=f"{n}x{n}")
     AB = sp.Matrix(A * B)
@@ -1548,13 +1783,37 @@ def gen_matrix_multiply(rng: random.Random) -> Problem | None:
     steps.append(f"STEP 1 the entry (i, j) of AB is the dot product of row i of A "
                  f"with column j of B")
     k = 1
-    for i in range(n):
-        for j in range(n):
+    if n <= 3:
+        # one step per entry: short enough to read and to fit the cap
+        for i in range(n):
+            for j in range(n):
+                k += 1
+                steps.append(f"STEP {k} (AB)_{{{i + 1}{j + 1}}} = "
+                             + _dot_product(list(A.row(i)), list(B.col(j))))
+    else:
+        # one step per ROW at 4x4 and 5x5. Twenty-five separate steps do
+        # not fit the 1536-token cap - the example was truncated at 1819
+        # tokens - and a truncated example loses the end of its
+        # completion, which is where the plot spec is. The benchmark
+        # scores 5x5 products, so the size cannot simply be dropped.
+        for i in range(n):
             k += 1
-            steps.append(f"STEP {k} (AB)_{{{i + 1}{j + 1}}} = "
-                         + _dot_product(list(A.row(i)), list(B.col(j))))
+            entries = "; ".join(
+                f"(AB)_{{{i + 1}{j + 1}}} "
+                + _dot_product_compact(list(A.row(i)), list(B.col(j)))
+                for j in range(n))
+            steps.append(f"STEP {k} row {i + 1}: {entries}")
     k += 1
-    steps.append(f"STEP {k} AB = {fmt_matrix(AB)}")
+    if n <= 3:
+        steps.append(f"STEP {k} AB = {fmt_matrix(AB)}")
+    else:
+        # At 4x4 and 5x5 the result matrix was printed THREE times - in
+        # this step, in "the answer is ...", and in the boxed answer - and
+        # that is what pushed the example past the 1536-token cap (1819
+        # tokens). The answer line already carries the matrix, so this
+        # step is dropped at the large sizes.
+        steps.append(f"STEP {k} every entry of AB is computed as above, and "
+                     f"the result is {n} by {n}")
     k += 1
     steps.append(f"STEP {k} VERIFY det(AB) = det(A) det(B). OK")
     return Problem("matrix_multiply", q, "\n".join(steps), fmt_matrix(AB), fmt_matrix(AB),
@@ -1564,7 +1823,7 @@ def gen_matrix_multiply(rng: random.Random) -> Problem | None:
 
 def gen_matrix_power(rng: random.Random) -> Problem | None:
     """A small integer power of a matrix."""
-    n = rng.choice([2, 3, 3, 4])
+    n = _bench_size(rng)
     A = _rand_int_matrix(rng, n, None, family="matrix_power", size=f"{n}x{n}")
     # A cubed needs two full matrix products, which is twice the text, so
     # it is kept to the small sizes. LinAlg-Bench only asks for A^2 anyway.
@@ -1577,24 +1836,54 @@ def gen_matrix_power(rng: random.Random) -> Problem | None:
     step_no = 1
     steps.append(f"STEP {step_no} A^2 = A A, and the entry (i, j) of A^2 is the "
                  f"dot product of row i of A with column j of A")
+    # As in gen_matrix_multiply: one step per entry at the small sizes,
+    # one step per ROW at 4x4 and 5x5. Twenty-five steps do not fit the
+    # 1536-token cap, and a truncated example loses the plot spec at the
+    # end of its completion.
     for i in range(n):
-        for j in range(n):
+        if n <= 3:
+            for j in range(n):
+                step_no += 1
+                steps.append(f"STEP {step_no} (A^2)_{{{i + 1}{j + 1}}} = "
+                             + _dot_product(list(A.row(i)), list(A.col(j))))
+        else:
             step_no += 1
-            steps.append(f"STEP {step_no} (A^2)_{{{i + 1}{j + 1}}} = "
-                         + _dot_product(list(A.row(i)), list(A.col(j))))
+            entries = "; ".join(
+                f"(A^2)_{{{i + 1}{j + 1}}} "
+                + _dot_product_compact(list(A.row(i)), list(A.col(j)))
+                for j in range(n))
+            steps.append(f"STEP {step_no} row {i + 1}: {entries}")
     step_no += 1
-    steps.append(f"STEP {step_no} A^2 = {fmt_matrix(A2)}")
+    if n <= 3:
+        steps.append(f"STEP {step_no} A^2 = {fmt_matrix(A2)}")
+    else:
+        # As in gen_matrix_multiply: at the large sizes the result matrix
+        # was printed three times, and the answer line already carries it.
+        steps.append(f"STEP {step_no} every entry of A^2 is computed as "
+                     f"above, and the result is {n} by {n}")
     if k == 3:
         step_no += 1
         steps.append(f"STEP {step_no} A^3 = A^2 A, and the entry (i, j) of A^3 is "
                      f"the dot product of row i of A^2 with column j of A")
         for i in range(n):
-            for j in range(n):
+            if n <= 3:
+                for j in range(n):
+                    step_no += 1
+                    steps.append(f"STEP {step_no} (A^3)_{{{i + 1}{j + 1}}} = "
+                                 + _dot_product(list(A2.row(i)), list(A.col(j))))
+            else:
                 step_no += 1
-                steps.append(f"STEP {step_no} (A^3)_{{{i + 1}{j + 1}}} = "
-                             + _dot_product(list(A2.row(i)), list(A.col(j))))
+                entries = "; ".join(
+                    f"(A^3)_{{{i + 1}{j + 1}}} "
+                    + _dot_product_compact(list(A2.row(i)), list(A.col(j)))
+                    for j in range(n))
+                steps.append(f"STEP {step_no} row {i + 1}: {entries}")
         step_no += 1
-        steps.append(f"STEP {step_no} A^3 = {fmt_matrix(Ak)}")
+        if n <= 3:
+            steps.append(f"STEP {step_no} A^3 = {fmt_matrix(Ak)}")
+        else:
+            steps.append(f"STEP {step_no} every entry of A^3 is computed as "
+                         f"above, and the result is {n} by {n}")
     step_no += 1
     steps.append(f"STEP {step_no} VERIFY A^k A = A^(k+1). OK")
     return Problem("matrix_power", q, "\n".join(steps), fmt_matrix(Ak), fmt_matrix(Ak),
@@ -1603,7 +1892,7 @@ def gen_matrix_power(rng: random.Random) -> Problem | None:
 
 def gen_matrix_vector(rng: random.Random) -> Problem | None:
     """A matrix times a vector."""
-    n = rng.choice([2, 3, 3, 4, 4, 5])
+    n = _bench_size(rng)
     A = _rand_int_matrix(rng, n, None, family="matrix_vector", size=f"{n}x{n}")
     v = sp.Matrix(n, 1, lambda i, j: draw_entry(rng, "matrix_vector", f"{n}x{n}"))
     Av = sp.Matrix(A * v)

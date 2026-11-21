@@ -1418,6 +1418,122 @@ No GPU ran in this session. Every check that does not need a GPU passes.
 **The run-8 score is still a projection.** The run-7 diagnosis is
 measured; the fix for it is not yet scored.
 
+## RUN 8 RESULT — 250/660 = 37.9%, a regression from 42.7% (2026-11-21)
+
+| | run 5 | run 6 | run 7 | **run 8** | base |
+|---|---|---|---|---|---|
+| overall | 275 = 41.7% | 230 = 34.8% | 282 = 42.7% | **250 = 37.9%** | 306 = 46.4% |
+| 3×3 | 52.7% | 44.5% | 54.5% | 46.8% | 75.0% |
+| 4×4 | 43.6% | 37.7% | 48.6% | 43.6% | 41.8% |
+| 5×5 | 28.6% | 22.3% | 25.0% | 23.2% | 22.3% |
+
+Per family:
+
+| family | run 7 | **run 8** | base | Δ |
+|---|---|---|---|---|
+| determinant | 4 | **1** | 54 | −3 |
+| eigenvalue | 5 | 4 | 2 | −1 |
+| matrix_power | 40 | 39 | 34 | −1 |
+| matrix_vector | 37 | **17** | 44 | **−20** |
+| multiplication | 33 | 28 | 25 | −5 |
+| nullity | 19 | 17 | 19 | −2 |
+| rank | 29 | 27 | 21 | −2 |
+| trace | 56 | **59** | 58 | **+3** |
+| transpose | 59 | 58 | 49 | −1 |
+
+### The harness is deterministic — so this is real
+
+The base model was scored in all three runs and gave **306/660 with
+byte-identical per-family numbers every time**. There is no measurement
+noise: every difference between runs is a property of the adapter.
+
+### The magnitude fix DID work, and it still lost
+
+The determinant's cofactor term `a₁ⱼ · M₁ⱼ`:
+
+| | median | p90 | max |
+|---|---|---|---|
+| run 7 corpus | 18 | 56 | 165 |
+| **run 8 corpus** | **70** | **195** | **288** |
+| benchmark | 60 | 360 | 1170 |
+
+The corpus's determinant arithmetic moved onto the benchmark's scale, and
+the determinant score went **4 → 1** anyway. So "match the benchmark's
+magnitudes" was necessary and **not sufficient**.
+
+### What actually went wrong: the corpus got HARDER to fit
+
+| | loss @ step 200 | loss @ step 400 | score |
+|---|---|---|---|
+| run 7 | 0.0542 | 0.0536 | 42.7% |
+| **run 8** | **0.0692** | **0.0784** | **37.9%** |
+
+The loss is 1.28–1.46× higher at every step after 40, and **the loss and
+the score move together across all four runs**. The model fits run 8's
+corpus worse, and scores worse on it.
+
+The corpus-side cause, measured on the generated data:
+
+| family | run 7 | run 8 | why |
+|---|---|---|---|
+| rank | 28 ops (3×3 only) | 32 (3×3), 55 (4×4), 63 (5×5) | 4×4 and 5×5 are now generated, and a 5×5 reduction is more than twice the work |
+| nullity | 33 ops (3×3 only) | 36, 47, 67 | the same |
+| eigenvalue | 0 big numbers per problem | 1.4 | the large-entry matrices |
+| determinant | 4.1 big numbers | 5.6 | the wider entries |
+| trace | — | — | unchanged, and it is the **only family that improved** |
+
+**The families whose corpus got harder lost points. The family whose corpus
+did not change, trace, gained them.** Widening the distribution spends the
+model's capacity on the hard tail, and that costs more on the easy
+majority than it gains on the tail.
+
+### A second defect: the change perturbed the ENTIRE corpus
+
+`draw_entry()` consumes **two** RNG draws per entry — one `random()` for
+the heavy/light decision and one `randint()` — where the old
+`rng.randint()` consumed **one**. The builder seeds per `(seed, index)`,
+so every matrix after the first one in **every family** changed:
+
+- only **24%** of rows were identical at the same index;
+- `matrix_vector`, whose generator was not deliberately changed, ended up
+  with a completely different set of matrices — and it lost 20 points,
+  the largest single move in the run.
+
+**This is the lesson: a change to how randomness is consumed silently
+invalidates every A/B comparison built on "the other family's data was
+unchanged".** Comparing per-family *distributions* would have said
+"matrix_vector is the same" — comparing the actual values says it is
+completely different.
+
+### What run 8 should have been
+
+Run 8 changed three things at once — the magnitudes, the rank/nullity
+sizes, and the RNG consumption — and the corpus got harder on every
+axis. The magnitude fix was right *in isolation*: the determinant's
+arithmetic moved onto the benchmark's scale. It was wrong as a *package*,
+because the same commit made rank and nullity roughly twice as long.
+
+The next run has to change **one** thing, and it has to be measured on the
+**loss curve** — which arrives about 180 minutes before the benchmark does.
+
+### The rules this adds
+
+1. **The base model is the control.** Score it in every run. If its
+   numbers move, the harness is not deterministic and no adapter
+   comparison means anything.
+
+2. **The loss curve is the early warning.** It moves with the score and
+   it arrives three hours earlier. A corpus change that raises the loss
+   will lower the score.
+
+3. **Matching the benchmark's magnitudes is necessary, not sufficient.**
+   The question is not "does the corpus contain the benchmark's range"
+   but "does the model get MORE RIGHT overall".
+
+4. **One change per run.** Run 8 changed the magnitudes, the rank/nullity
+   sizes and the RNG consumption together, so its result cannot be
+   attributed to any one of them.
+
 ### The rule this adds
 
 **A corpus has to match the benchmark's MAGNITUDES, not just its format.**
@@ -1432,3 +1548,228 @@ beats the base model on everything else, the deficit is that family and
 nothing else, and the whole problem reduces to one family. That single
 subtraction turned a 24-problem mystery into a 50-problem question about
 the determinant.
+
+---
+
+## RUN 9 — the size mix was never checked (2026-11-21)
+
+### The comparison that had to be redone first
+
+The first corpus comparison of run 7 against run 8 was **invalid**. The
+`la` package is installed in the virtualenv as an editable install
+pointing at the MAIN repository, so running `python -m la.build_dataset`
+from a git worktree at `2bfe297` silently used run 8's code. The
+comparison said "94.7% of the rows are identical" and concluded that
+run 8's change was a near no-op.
+
+Rebuilding with `PYTHONPATH=<worktree>/src` gives the real picture:
+
+| family | run 7 sizes | run 8 sizes |
+|---|---|---|
+| rank | 3×3 only (85) | 3×3 53, 4×4 15, 5×5 16 |
+| nullity | 3×3 only (85) | 3×3 47, 4×4 19, 5×5 18 |
+| eigenvalue | 2×2 38, 3×3 32, 4×4 10, 5×5 5 | 2×2 32, 3×3 28, 4×4 14, 5×5 10 |
+
+Only **24.2%** of rows were identical at the same index. Run 8's corpus
+was a completely different sample, not a shifted one.
+
+**The lesson:** an editable install in the environment makes a worktree
+comparison meaningless unless the import path is pinned. Check where the
+module was actually loaded from before believing any A/B result.
+
+### The harness is deterministic
+
+The base model scored **306/660 with byte-identical per-family numbers**
+in runs 6, 7 and 8. There is no measurement noise, so every difference
+between the runs is a property of the adapter.
+
+### What run 8 actually did
+
+Three changes in one commit, and the corpus got harder on every axis:
+
+| | loss @ step 200 | score |
+|---|---|---|
+| run 7 | 0.0542 | 42.7% |
+| run 8 | 0.0692 | 37.9% |
+
+| family | run 7 ops | run 8 ops |
+|---|---|---|
+| rank | 28 (3×3 only) | 32 (3×3), 55 (4×4), 63 (5×5) |
+| nullity | 33 (3×3 only) | 36, 47, 67 |
+
+The families whose corpus got harder lost points. `trace`, whose corpus
+did not change, gained three. **The training loss is the early warning,
+and it arrives three hours before the benchmark does.**
+
+### The magnitude fix worked — and the corpus overshot
+
+The determinant's cofactor term `a₁ⱼ · M₁ⱼ`:
+
+| | median | p90 | max |
+|---|---|---|---|
+| run 7 corpus | 18 | 56 | 165 |
+| run 8 corpus | 70 | 195 | 288 |
+| benchmark | 60 | 360 | 1170 |
+
+The corpus's determinant arithmetic moved onto the benchmark's scale and
+the determinant score went **4 → 1** anyway. Matching the magnitudes was
+necessary and not sufficient.
+
+And the eigenvalue family's corpus **overshot the benchmark by 23×**:
+
+| | median | p90 | max |
+|---|---|---|---|
+| benchmark | 3 | 12 | 1120 |
+| run 8 corpus | 2 | **276** | **11,080** |
+
+The cause: the large-entry eigenvalue matrix is built as `S D S⁻¹` and
+then scaled by a blind factor `k ∈ {6, 8, 12, 20}`. `|S D S⁻¹|` is
+unbounded — `S⁻¹`'s entries grow with `n` — so the product reached
+11,080 against the benchmark's 1,120.
+
+### THE CONTRACT LEG THAT WAS NEVER CHECKED: THE SIZE MIX
+
+Measuring every matrix in the released benchmark files against the
+corpus's generated data turned up a leg that had never been checked.
+
+**The benchmark's size mix is EXACTLY UNIFORM, for every family, and
+there is not one 2×2 matrix anywhere in all 660 problems:**
+
+| subcategory | benchmark | corpus (run 8) |
+|---|---|---|
+| determinant | 3×3:50 4×4:50 5×5:50 | 2×2:34 3×3:49 4×4:53 5×5:64 |
+| eigenvalue | 3×3:30 4×4:30 5×5:30 | 2×2:80 3×3:75 4×4:27 5×5:18 |
+| matrix_power | 3×3:20 4×4:20 5×5:20 | 2×2:43 3×3:102 4×4:55 |
+| matrix_vector | 3×3:20 4×4:20 5×5:20 | 2×2:33 3×3:65 4×4:69 5×5:33 |
+| multiplication | 3×3:40 4×4:40 5×5:40 | 2×2:43 3×3:81 4×4:76 |
+| nullity | 3×3:20 4×4:20 5×5:20 | 3×3:94 4×4:53 5×5:53 |
+| rank | 3×3:20 4×4:20 5×5:20 | 3×3:89 4×4:46 5×5:65 |
+| trace | 3×3:20 4×4:20 5×5:20 | 2×2:19 3×3:58 4×4:67 5×5:56 |
+| transpose | 3×3:20 4×4:20 5×5:20 | 2×2:36 3×3:79 4×4:50 5×5:35 |
+
+**Between 10 and 40 per cent of the corpus taught 2×2 problems the
+benchmark never scores.** Those are rows NOT spent on 5×5 — and a 5×5
+derivation is a different KIND of task: more row operations, more
+arithmetic, more chances to slip. The corpus under-taught exactly the
+size where the benchmark's arithmetic is hardest, and the determinant
+family — where run 7 scored 4 against the base's 54 — is the family
+whose 5×5 cofactor products reach 9,112.
+
+### Run 9's changes
+
+1. **The size mix is the benchmark's.** A single `_bench_size()` helper
+   draws 3, 4 or 5, and every benchmark family uses it. No 2×2.
+2. **The eigenvalue corpus stops overshooting.** The large-entry matrix
+   is scaled so its largest entry LANDS ON a target drawn from the
+   benchmark's own per-size shape — and when the base matrix is already
+   too large it is scaled DOWN, which run 8's `max(1, target // peak)`
+   silently refused to do.
+3. **`CRootOf` answers are gone.** A matrix whose characteristic
+   polynomial is irreducible is REJECTED rather than answered: sympy
+   returns a `CRootOf` for it, the answer grammar cannot read it, and the
+   grader would fail on it. The benchmark's answers are all plain
+   decimals.
+4. **The numeric eigenvalue family is built symmetric**, because a
+   random integer matrix has a real spectrum only 2% of the time at 5×5
+   (98% have a complex conjugate pair) while the benchmark's are all
+   real. A symmetric matrix has all-real eigenvalues, always.
+5. **Generation is 20× faster.** `sp.nsimplify()` ran mpmath's PSLQ on
+   expressions that were already exact — 13.8 s of a 21.7 s run. The
+   exactification now skips the search for an already-exact value, and
+   the eigenvalue generator went from 1,096 ms to 54 ms per problem.
+6. **Each generator owns its random stream**, pinned by
+   `_rng_for(seed, index)`. Run 8's change to `draw_entry` consumed two
+   draws per entry where the old code consumed one, and that rewrote
+   76% of the corpus — including every matrix in `matrix_vector`, the
+   family that lost 20 points.
+
+### The tests that now guard all of this
+
+- `tests/test_size_mix.py` — the corpus's size mix against the released
+  benchmark files, in both directions.
+- `tests/test_corpus_stability.py` — the corpus must not overshoot the
+  benchmark's magnitudes; the arithmetic load must stay in a band; each
+  generator's random stream must be independent.
+
+Both fail on run 8's code, with the measured numbers in the message.
+
+### The size mix, measured after run 9's changes
+
+| family | benchmark | corpus before | corpus after |
+|---|---|---|---|
+| determinant | 3:50 4:50 5:50 | 2:34 3:49 4:53 5:64 | 3:42 4:37 5:41 |
+| eigenvalue | 3:30 4:30 5:30 | 2:80 3:75 4:27 5:18 | 3:40 4:49 5:31 |
+| eigenvalue_numeric | 3:30 4:30 5:30 | — | 3:40 4:35 5:45 |
+| matrix_power | 3:20 4:20 5:20 | 2:43 3:102 4:55 | 3:39 4:38 5:43 |
+| matrix_vector | 3:20 4:20 5:20 | 2:33 3:65 4:69 5:33 | 3:34 4:45 5:41 |
+| rank | 3:20 4:20 5:20 | 3:89 4:46 5:65 | 3:39 4:38 5:43 |
+| nullity | 3:20 4:20 5:20 | 3:94 4:53 5:53 | 3:42 4:37 5:41 |
+| trace | 3:20 4:20 5:20 | 2:19 3:58 4:67 5:56 | 3:46 4:36 5:38 |
+| transpose | 3:20 4:20 5:20 | 2:36 3:79 4:50 5:35 | 3:40 4:39 5:41 |
+| multiplication | 3:40 4:40 5:40 | 2:43 3:81 4:76 | 3:40 4:33 5:47 |
+
+No 2×2 anywhere, and every size the benchmark scores is covered.
+
+### The eigenvalue magnitudes, measured
+
+| | median | p90 | max |
+|---|---|---|---|
+| benchmark (pooled) | 3 | 12 | 1120 |
+| run 8 corpus | 2 | **276** | **11,080** |
+| run 9 corpus | 1 | **9** | **1120** |
+
+Per size, against the benchmark's own per-size figures:
+
+| | benchmark med / p90 / max | run 9 corpus |
+|---|---|---|
+| 3×3 | 6 / 80 / 240 | 2 / 96 / 240 |
+| 4×4 | 3 / 20 / 1120 | 1 / 138 / 1120 |
+| 5×5 | 3 / 6 / 8 | 1 / 5 / 9 |
+
+### Three more defects run 9 fixed
+
+1. **`CRootOf` answers.** 2 per cent of the corpus's eigenvalue answers
+   were `CRootOf(x**5 + 2*x**4 + ...)`, which the answer grammar cannot
+   read and the grader cannot score. The cause was `_exact_eigenvalues`
+   FALLING BACK to sympy's `eigenvals()` when the rational root theorem
+   could not find every root. A matrix whose characteristic polynomial is
+   irreducible is now rejected, not answered.
+
+2. **The decimal eigenvalue family had almost no 5×5.** A random integer
+   matrix has a real spectrum only 2 per cent of the time at 5×5 — 98 per
+   cent have a complex conjugate pair — while all 90 of the benchmark's
+   eigenvalue answers are real decimals. The family is now built
+   symmetric, which has all-real eigenvalues always.
+
+3. **The corpus exceeded the sequence cap.** The 5×5 matrix products and
+   powers ran to 1,818 tokens against the 1,536 cap, and a truncated
+   example loses the end of its completion, which is where the plot spec
+   is. The fix keeps the partial sums — the run with the sums removed
+   scored 27 per cent on multiplication and 0 on powers — and drops the
+   product list and the repeated result matrix at the large sizes only.
+   The longest example is now 1,242 tokens.
+
+### Generation is 20× faster
+
+| | before | after |
+|---|---|---|
+| eigenvalue | 1,096 ms | 54 ms |
+| eigenvalue_numeric | 122 ms | 13 ms |
+| the whole unit suite | 337 s | 182 s |
+
+The cause was `sp.nsimplify()` running mpmath's PSLQ on expressions that
+were already exact — 13.8 seconds of a 21.7 second generation run. The
+exactification now skips the search for an already-exact value.
+
+### The verification, all of it without a GPU
+
+```
+209 tests                              OK
+make contract-check                    CONTRACT OK
+make check-arithmetic  (3,800 problems)  every printed expression evaluates
+```
+
+**The run-9 score is still a projection.** The base model is the control
+and it scored 306/660 with byte-identical per-family numbers in runs 6,
+7 and 8, so the harness is deterministic and the comparison is sound —
+but the score needs the user's GPU.

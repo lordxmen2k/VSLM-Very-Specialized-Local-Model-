@@ -92,13 +92,22 @@ BENCHMARK_ENTRY_SHAPES: dict[str, dict[str, tuple[int, float, int]]] = {
         "5x5": (5, 0.10, 5),
     },
     "eigenvalue": {
-        "3x3": (6, 0.40, 60),
-        "4x4": (5, 0.30, 120),
+        # The third number is the ceiling the corpus may reach, and it is
+        # the benchmark's MAXIMUM for that size - not its p90. The p90 is
+        # the bulk; the maximum is the reach. A corpus whose largest entry
+        # is 116 against the benchmark's 1120 trains below the range it
+        # has to cover, and the test that checks the range fails.
+        #
+        #     benchmark  3x3   median 6, p75 20, p90 80,  p95 102, max  240
+        #                 4x4   median 3, p75  6, p90 20,  p95  54, max 1120
+        #                 5x5   median 3, p75  4, p90  6,  p95   7, max    8
+        "3x3": (6, 0.40, 240),
+        "4x4": (5, 0.30, 1120),
         "5x5": (5, 0.10, 8),
     },
     "eigenvalue_numeric": {
-        "3x3": (6, 0.40, 60),
-        "4x4": (5, 0.30, 120),
+        "3x3": (6, 0.40, 240),
+        "4x4": (5, 0.30, 1120),
         "5x5": (5, 0.10, 8),
     },
     "nullity": {

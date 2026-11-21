@@ -53,6 +53,63 @@ def _fmt_number(x: sp.Expr) -> str:
     return str(x)
 
 
+def _exactify(expr):
+    """Turn a numeric expression into its exact form, CHEAPLY.
+
+    `sp.nsimplify()` is the obvious call and it is a trap: it runs
+    mpmath's PSLQ, which searches for a simple closed form for a
+    floating-point number. On an exact expression that search is
+    wasted, and on a large-entry matrix's eigenvalue it is catastrophic -
+    the root isolation and refinement below took 13.8 seconds of a
+    21.7 second generation run.
+
+    So: if the expression is ALREADY exact, do not touch it. Only pay for
+    `nsimplify` when there is genuinely a float to simplify, and even then
+    only when the float is not obviously a simple decimal.
+
+    The exactness check matters: `nsimplify` can turn a perfectly good
+    exact value into a different one, and the eigenvalue family needs its
+    rational roots exactly as the rational root theorem found them.
+    """
+    if not getattr(expr, "is_number", False):
+        # a plain Python float or int is already exact enough
+        if isinstance(expr, float):
+            return sp.Float(expr)
+        if isinstance(expr, int):
+            return sp.Integer(expr)
+        return expr
+    # an exact algebraic ROOT OBJECT still has to be written as radicals.
+    # `sp.RootOf(...)` is what sympy's eigenvals() returns for an
+    # irreducible characteristic polynomial, and the answer grammar cannot
+    # read it back - the grader sees `CRootOf(x**5 + ...)` and fails. The
+    # conversion is cheap (a symbolic radical, no numeric search), unlike
+    # the PSLQ path below.
+    if expr.has(sp.RootOf):
+        expr = expr.doit(radicals=True) if hasattr(expr, "doit") else expr
+        if expr.has(sp.RootOf):
+            # the radical form is not available; fall back to nsimplify,
+            # which at least produces something the grammar can read
+            return sp.nsimplify(expr)
+    # already exact: an integer, a rational, an algebraic expression
+    if expr.is_Integer or expr.is_Rational or expr.is_algebraic:
+        return expr
+    # a complex number is exact when its two parts are
+    if expr.is_number and getattr(expr, "is_complex", False):
+        real, imag = expr.as_real_imag()
+        if real.is_Integer or real.is_Rational:
+            if imag.is_Integer or imag.is_Rational:
+                return expr
+    if expr.is_Float:
+        # a float that is exactly an integer needs no PSLQ search
+        try:
+            as_int = int(expr)
+            if sp.Float(as_int) == expr:
+                return sp.Integer(as_int)
+        except (TypeError, ValueError):
+            pass
+    return sp.nsimplify(expr)
+
+
 def fmt_scalar(expr) -> str:
     """Print a value in the answer grammar.
 
@@ -61,7 +118,7 @@ def fmt_scalar(expr) -> str:
     """
     if isinstance(expr, sp.Matrix):
         return fmt_matrix(expr)
-    expr = sp.nsimplify(expr) if expr.is_number else expr
+    expr = _exactify(expr)
     expr = sp.expand(expr)
 
     if expr.is_Add:
