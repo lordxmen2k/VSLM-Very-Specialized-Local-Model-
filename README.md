@@ -199,6 +199,40 @@ counts, and `tests/test_tail_table_matches_benchmark.py` compares that table
 against the released problem files **line for line** — so the table cannot
 drift from the data the way a hand-written one did.
 
+**Run 7's score was 282/660 = 42.7%.** The fix worked: every family but one
+improved, and the fine-tune now beats base on 4×4 (+6.8 points) and 5×5
+(+2.7). But it was still 24 problems behind.
+
+**Run 8 — the arithmetic the benchmark asks for.** The sixth leg of the
+contract is the *magnitude* of the numbers.
+
+One family was the entire deficit. Remove the determinant and the fine-tune
+**wins**:
+
+| | score |
+|---|---|
+| run 7, all nine families | 282/660 = 42.7% |
+| run 7, without determinant | 278/510 = **54.5%** |
+| base, all nine families | 306/660 = 46.4% |
+| base, without determinant | 252/510 = 49.4% |
+
+The corpus drew every matrix from entries in `[-4, 5]`. The benchmark's 3×3
+determinant matrices use entries in `[-9, 9]`, and the cofactor term
+`a₁ⱼ · M₁ⱼ` — the product the model has to form — has a **median of 20 in the
+corpus and 60 in the benchmark**, with a p90 of 360. At 5×5, 82% of the
+corpus's derivations contain a fraction whose numerator is at least 100; the
+benchmark's 5×5 determinants reach 9,112.
+
+The corpus taught a chain of exact arithmetic and then asked for a bigger
+number than the chain was trained on. One slip loses the whole problem. The
+base model, never taught that chain, answers directly and lands more of
+them.
+
+Run 8 draws each family's matrices from the benchmark's own entry
+distribution — mostly small, with the benchmark's tail of large ones — and
+generates rank and nullity at 4×4 and 5×5, which the benchmark scores and
+the corpus never produced.
+
 `make contract-check` prints the whole map and fails on a mismatch, without
 a GPU. It now checks all ten families against all three of their tails.
 

@@ -1268,3 +1268,167 @@ No GPU ran in this session. Every check that does not need a GPU passes
 arithmetic check on 3,800 problems). **The run-7 score is still a
 projection.** The diagnosis for run 6 is measured; the fix for it is not
 yet scored.
+
+## RUN 7 RESULT — 282/660 = 42.7%, up from 34.8% (2026-11-20)
+
+The rerun was genuine: it pulled `2bfe297`, the contract checker reported
+**3/3 tails for all ten families**, the corpus had 19 families at the 70/30
+mix, the arithmetic check passed, and the adapter trained to
+`runs/vslm-run6`.
+
+| | run 5 | run 6 | **run 7** | base |
+|---|---|---|---|---|
+| overall | 275/660 = 41.7% | 230/660 = 34.8% | **282/660 = 42.7%** | 306/660 = 46.4% |
+| 3×3 | 52.7% | 44.5% | **54.5%** | 75.0% |
+| 4×4 | 43.6% | 37.7% | **48.6%** | 41.8% |
+| 5×5 | 28.6% | 22.3% | **25.0%** | 22.3% |
+
+Per family, run 7 against base:
+
+| family | run 5 | run 6 | **run 7** | base | run 7 − base |
+|---|---|---|---|---|---|
+| determinant | 1 | 0 | **4** | 54 | **−50** |
+| eigenvalue | 1 | 2 | 5 | 2 | +3 |
+| matrix_power | 43 | 33 | 40 | 34 | +6 |
+| matrix_vector | 45 | 16 | 37 | 44 | −7 |
+| multiplication | 33 | 26 | 33 | 25 | +8 |
+| nullity | 15 | 20 | 19 | 19 | 0 |
+| rank | 21 | 21 | 29 | 21 | +8 |
+| trace | 56 | 52 | 56 | 58 | −2 |
+| transpose | 60 | 60 | 59 | 49 | +10 |
+
+**The prompt-shape fix worked.** Every family except determinant improved,
+4×4 went from 37.7% to 48.6% (**+6.8 over base**), 5×5 went from 22.3% to
+25.0% (**+2.7 over base**), and the fine-tune now beats base on two of the
+three sizes. The families whose prompt varied least are the ones that held
+or improved, exactly as the diagnosis predicted.
+
+**But the overall score is still 24 problems behind, and one family is the
+whole of it.**
+
+## RUN 8 — the arithmetic the benchmark asks for
+
+### The decisive number
+
+Remove the determinant family and the fine-tune **wins**:
+
+    run 7 without determinant = 278/510 = 54.5%
+    base  without determinant = 252/510 = 49.4%
+
+One family — 4/150 against the base model's 54/150 — is the entire
+24-problem deficit. Everything else is competitive or better.
+
+### What was actually wrong
+
+The prompt shape was fixed in run 7 and the corpus's determinant
+derivations are arithmetically correct (`make check-arithmetic` passes on
+3,800 problems, and 14 of 14 cofactor-instructed problems use cofactors
+with 0 wrong answers). The problem was the **arithmetic load**:
+
+    corpus 3x3 determinant matrix entries:   [-4, 5]
+    benchmark 3x3 determinant matrix entries: [-9, 9]
+
+    corpus 3x3:    cofactor term a_1j * M_1j, median  20
+    benchmark 3x3:                              median  60, p90 360
+
+    corpus 5x5: 82% of derivations contain a fraction whose numerator is
+    >= 100, the largest seen at 4009; the benchmark's 5x5 determinants
+    reach 9112.
+
+The corpus taught the model to emit a long chain of exact arithmetic — nine
+numbered steps at 3×3, and at 5×5 a fraction cascade like `807/118` — and
+then asked for a bigger number than the chain was trained on. **One slip
+loses the whole problem.** The base model was never taught that chain, so
+it answers directly and lands the number more often.
+
+The benchmark's entry distributions have a TAIL, and the corpus's old range
+was the small end with none of it:
+
+| family | size | median \|entry\| | p90 | max |
+|---|---|---|---|---|
+| rank | 3×3 | 3 | 8 | 18 |
+| rank | 4×4 | 3 | 9 | 31 |
+| nullity | 3×3 | 4 | 12 | 24 |
+| nullity | 4×4 | 4 | 12 | 32 |
+| eigenvalue | 3×3 | 6 | 80 | 240 |
+| eigenvalue | 4×4 | 3 | 20 | 1120 |
+| determinant | 3×3 | 8 | 9 | 9 |
+
+### What run 8 changed
+
+| change | where |
+|---|---|
+| the benchmark's entry SHAPE per family and size | `src/la/benchprompt_magnitudes.py` (new) |
+| the corpus draws its matrices with that shape | `src/la/problems.py` (`draw_entry`, `_rand_int_matrix`) |
+| rank and nullity generate 4×4 and 5×5 as well as 3×3 | `src/la/problems.py` (`_rank_problem`) |
+| the rank plot changes with the size | `src/la/problems.py` (`_rank_plot`) |
+| one eigenvalue problem in four is large-entry and rank-deficient | `src/la/problems.py` (`_large_entry_eigenvalue_matrix`) |
+| the eigenvalues come from the rational root theorem, not `simplify()` | `src/la/problems.py` (`_exact_eigenvalues`) |
+| the magnitudes are checked against the released files | `tests/test_entry_range_coverage.py` (new) |
+
+Three details worth keeping:
+
+1. **The large-entry eigenvalue matrix is built as `S D S⁻¹`** with `S` an
+   integer unimodular matrix, so the entries are large and integral while
+   the spectrum stays small and simple. A *random* large matrix produces an
+   irreducible characteristic polynomial whose roots come out as
+   cubic-root expressions — the benchmark never asks for those, and a
+   corpus that teaches cube roots teaches the wrong arithmetic.
+
+2. **`simplify()` on a large-entry 5×5's eigenvalues took 2.1 seconds.**
+   The rational root theorem gives the same answer in milliseconds: the
+   eigenvalue family went from **1394 ms per problem to 9 ms**, a 150×
+   speedup that keeps the corpus build at about 1.8 minutes on four
+   workers.
+
+3. **A null space of four or five dimensions cannot be drawn in three.**
+   The rank and nullity families now generate at all three sizes, and the
+   plot changes: 3×3 draws the null space, 4×4 and 5×5 draw the echelon
+   form — which is the thing the derivation reduces to, and whose pivot
+   count *is* the rank.
+
+### Verification
+
+`make check` exit 0 · `make contract-check` exit 0 · **196 tests pass** ·
+the arithmetic check passes on 3,800 problems across 19 families · the
+eigenvalue answers were checked against the matrices' true spectra on 300
+generated problems, 0 wrong.
+
+### The rerun procedure — every command names the adapter
+
+```bash
+git pull
+make contract-check                          # no GPU: the contract map must be clean
+rm -rf data                                  # the previous corpus is still on disk
+make data                                    # ~2 min
+make check-arithmetic                        # no GPU
+make train ADAPTER=runs/vslm-run6            # ~180 min on one RTX 4070 SUPER
+make eval ADAPTER=runs/vslm-run6             # ~31 min
+make bench-all ADAPTER=runs/vslm-run6        # ~41 min adapter, ~94 min base
+```
+
+**`ADAPTER=runs/vslm-run6` on every scoring command.** The Makefile's
+default is the old `runs/vslm`, and the default wins — a `make bench-all`
+without it scores the wrong adapter. This is the same class of bug as the
+wrong-base-model one in run 5.
+
+### What is not yet measured
+
+No GPU ran in this session. Every check that does not need a GPU passes.
+**The run-8 score is still a projection.** The run-7 diagnosis is
+measured; the fix for it is not yet scored.
+
+### The rule this adds
+
+**A corpus has to match the benchmark's MAGNITUDES, not just its format.**
+The prompt shape was the fifth leg of the contract; the arithmetic load is
+the sixth. A corpus that teaches "here is a determinant, now compute it"
+has to teach it at the size of number the benchmark will ask for, or it
+has taught a chain that cannot reach the answer.
+
+And the diagnostic that found it: **when one family is far below its
+neighbours, compute the score WITHOUT that family.** If the fine-tune
+beats the base model on everything else, the deficit is that family and
+nothing else, and the whole problem reduces to one family. That single
+subtraction turned a 24-problem mystery into a 50-problem question about
+the determinant.
