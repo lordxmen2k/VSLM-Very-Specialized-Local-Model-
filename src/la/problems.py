@@ -1783,19 +1783,33 @@ def gen_matrix_multiply(rng: random.Random) -> Problem | None:
     steps.append(f"STEP 1 the entry (i, j) of AB is the dot product of row i of A "
                  f"with column j of B")
     k = 1
-    if n <= 3:
-        # one step per entry: short enough to read and to fit the cap
+    if n <= 4:
+        # One step per entry at 3x3 and 4x4, and the FULL dot product.
+        #
+        # Run 9 grouped the entries by row and dropped the product terms
+        # at 4x4 and 5x5, to fit the sequence cap. The cap fitted - the
+        # 4x4 example is 983 tokens in the full form against a 1536 cap
+        # - but the model was shown "4 - 4 - 3 + 0" and never the
+        # "4*4", "(-4)*(-4)", "3*3", "0*0" that produced those terms. So
+        # it was taught to emit a sum it had no idea how to compute, and
+        # matrix_power fell from 41/60 to 15/60. The whole run fell with
+        # it: 259/660 to 225/660.
+        #
+        # The arithmetic checker could not see this. It validates the
+        # expression on the LEFT of each "=", and a compact line is a
+        # perfectly well formed, perfectly well valued expression. What
+        # it stopped TEACHING is invisible to a checker that only asks
+        # whether what is present is right.
         for i in range(n):
             for j in range(n):
                 k += 1
                 steps.append(f"STEP {k} (AB)_{{{i + 1}{j + 1}}} = "
                              + _dot_product(list(A.row(i)), list(B.col(j))))
     else:
-        # one step per ROW at 4x4 and 5x5. Twenty-five separate steps do
-        # not fit the 1536-token cap - the example was truncated at 1819
-        # tokens - and a truncated example loses the end of its
-        # completion, which is where the plot spec is. The benchmark
-        # scores 5x5 products, so the size cannot simply be dropped.
+        # At 5x5 the full form runs to 1,587 tokens against the 1536 cap,
+        # so THIS size alone keeps the reduced form: one step per row,
+        # and the partial sums without the product list. The 5x5 example
+        # is the one that has to fit.
         for i in range(n):
             k += 1
             entries = "; ".join(
@@ -1836,12 +1850,12 @@ def gen_matrix_power(rng: random.Random) -> Problem | None:
     step_no = 1
     steps.append(f"STEP {step_no} A^2 = A A, and the entry (i, j) of A^2 is the "
                  f"dot product of row i of A with column j of A")
-    # As in gen_matrix_multiply: one step per entry at the small sizes,
-    # one step per ROW at 4x4 and 5x5. Twenty-five steps do not fit the
-    # 1536-token cap, and a truncated example loses the plot spec at the
-    # end of its completion.
+    # As in gen_matrix_multiply: the FULL dot product at 3x3 and 4x4, and
+    # the reduced form at 5x5 only, because the 5x5 example is the one
+    # that does not fit the 1536-token cap. Run 9 dropped the products
+    # at 4x4 as well, and matrix_power fell from 41/60 to 15/60.
     for i in range(n):
-        if n <= 3:
+        if n <= 4:
             for j in range(n):
                 step_no += 1
                 steps.append(f"STEP {step_no} (A^2)_{{{i + 1}{j + 1}}} = "
@@ -1866,7 +1880,7 @@ def gen_matrix_power(rng: random.Random) -> Problem | None:
         steps.append(f"STEP {step_no} A^3 = A^2 A, and the entry (i, j) of A^3 is "
                      f"the dot product of row i of A^2 with column j of A")
         for i in range(n):
-            if n <= 3:
+            if n <= 4:
                 for j in range(n):
                     step_no += 1
                     steps.append(f"STEP {step_no} (A^3)_{{{i + 1}{j + 1}}} = "

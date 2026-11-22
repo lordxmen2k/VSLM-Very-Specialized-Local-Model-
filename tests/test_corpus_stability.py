@@ -231,9 +231,21 @@ class TestTheCorpusArithmeticLoadStaysInsideABand(unittest.TestCase):
     """
 
     # The families differ enormously by nature: a matrix product is
-    # legitimately ~180 operations and a matrix trace is ~8. What must
+    # legitimately ~200 operations and a matrix trace is ~8. What must
     # not happen is a family multiplying its load without a test failing.
-    MAX_MEAN_OPS = 240
+    #
+    # The band was raised from 240 to 280 for run 10, and the reason
+    # matters: run 9 dropped the PRODUCT TERMS from the 4x4 and 5x5 dot
+    # products to fit the sequence cap, and matrix_power fell from
+    # 41/60 to 15/60 - more than the whole regression. Restoring the
+    # products puts matrix_power at 248 operations, over the old band.
+    #
+    # The band is a CHANGE DETECTOR, not a difficulty target. A longer
+    # derivation that SHOWS ITS WORK is the whole point; the length is
+    # bounded by the sequence cap, which is checked separately and
+    # exactly (tests/test_prompt_format.py and
+    # tests/test_derivation_shows_products.py).
+    MAX_MEAN_OPS = 280
 
     def test_no_family_is_much_longer_than_it_was(self):
         for family in ("determinant", "matrix_vector", "matrix_trace",
@@ -246,7 +258,12 @@ class TestTheCorpusArithmeticLoadStaysInsideABand(unittest.TestCase):
                     f"{family}: the mean derivation is {ops:.0f} arithmetic "
                     f"operations, over the {self.MAX_MEAN_OPS} band. A "
                     f"corpus that gets this much harder to fit lowers the "
-                    f"score (run 8: rank 29 -> 27, nullity 19 -> 17).")
+                    f"score (run 8: rank 29 -> 27, nullity 19 -> 17). "
+                    f"Before raising the band, check whether the extra "
+                    f"length is WORK THE MODEL NEEDS - run 9 shortened the "
+                    f"derivations to fit the sequence cap and matrix_power "
+                    f"fell from 41/60 to 15/60, and a longer derivation "
+                    f"that shows its products is the point.")
 
     @staticmethod
     def _mean_ops(family, n=150):

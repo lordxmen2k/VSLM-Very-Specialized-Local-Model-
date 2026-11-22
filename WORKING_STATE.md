@@ -1874,3 +1874,102 @@ gives 255/510 = 50.0% against the base's 252/510 = 49.4%. **The fine-tune
 is one problem ahead of the base on every other family.** Everything now
 turns on one family, and run 10 should touch the determinant and nothing
 else — including the size mix, which must now stay uniform.
+
+---
+
+## RUN 9 RESULT — 225/660 = 34.1%, a regression (2026-11-22)
+
+The run used the right code this time: the pull fast-forwarded
+`0f64ed5..36d1bbc`, the contract check printed the size-mix table, and
+corpus generation ran at **1,268/s** against run 8's 373/s — the
+`_exactify` fast path, 3.4× faster.
+
+| | run 7 | run 8 | the 259-run | **run 9** | base |
+|---|---|---|---|---|---|
+| overall | 282 = 42.7% | 250 = 37.9% | 259 = 39.2% | **225 = 34.1%** | 306 = 46.4% |
+| 3×3 | 58/220 | 103/220 | 97/220 | 100/220 | 165/220 |
+| 4×4 | 107/220 | 96/220 | 95/220 | **70/220** | 92/220 |
+| 5×5 | 55/220 | 51/220 | 67/220 | 55/220 | 49/220 |
+
+### The loss curve predicted it
+
+| step | run 7 | run 8 | the 259-run | **run 9** |
+|---|---|---|---|---|
+| 200 | 0.0542 | 0.0692 | 0.0687 | **0.0761** |
+| 400 | 0.0536 | 0.0784 | 0.0790 | 0.0812 |
+| 600 | 0.0425 | 0.0553 | 0.0543 | 0.0578 |
+| 800 | 0.0448 | 0.0591 | 0.0593 | 0.0592 |
+| 1000 | 0.0374 | 0.0597 | 0.0598 | 0.0602 |
+
+**Run 9 has the highest loss of any run and the worst score.** The
+early-warning rule held: the loss arrives three hours before the
+benchmark, and it said run 9 would be worse than run 8.
+
+### The cause: run 9 stopped teaching the multiplications
+
+| family | 259-run | **run 9** | base | Δ |
+|---|---|---|---|---|
+| **matrix_power** | 41 | **15** | 34 | **−26** |
+| matrix_vector | 18 | 8 | 44 | −10 |
+| multiplication | 33 | 29 | 25 | −4 |
+| determinant | 4 | 3 | 54 | −1 |
+| eigenvalue | 4 | 2 | 2 | −2 |
+| nullity | 14 | 20 | 19 | **+6** |
+| rank | 26 | 29 | 21 | **+3** |
+| trace | 59 | 59 | 58 | 0 |
+| transpose | 60 | 60 | 49 | 0 |
+
+`matrix_power` lost 26 problems — more than the whole 34-problem
+regression.
+
+**The mechanism.** Run 9 changed the dot product's format at 4×4 and 5×5
+to fit the 1,536-token sequence cap:
+
+    full:     4*4 + (-4)*(-4) + 3*3 + 0*0 = 16 + 16 + 9 + 0 = 41
+    compact:                        16 + 16 + 9 + 0 = 41
+
+The compact form drops the **products**. The model is shown the partial
+sums and never the multiplication that produced each term, so it is
+taught to emit a number it cannot compute. `matrix_power` went from
+41/60 to 15/60 and the 4×4 column from 95 to 70.
+
+**The arithmetic checker could not see it.** It validates the expression
+on the LEFT of each `=`, and a compact line is a perfectly well formed,
+perfectly well valued expression. What it stopped TEACHING is invisible
+to a checker that only asks whether what is present is right.
+
+### The fix
+
+**The 4×4 form fits the cap in full.** Measured, not assumed:
+
+| | full form | tokens | cap |
+|---|---|---|---|
+| matrix_power 3×3 | 1,206 chars | 591 | ok |
+| matrix_power 4×4 | 2,005 chars | **983** | ok |
+| matrix_power 5×5 | 3,267 chars | 1,601 | over |
+| matrix_multiply 4×4 | 2,008 chars | **984** | ok |
+| matrix_multiply 5×5 | 3,237 chars | 1,587 | over |
+
+So run 10 restores the FULL dot product at 3×3 and 4×4 and keeps the
+reduced form at **5×5 only** — the one size that genuinely does not fit.
+The longest example is now 1,242 tokens.
+
+`tests/test_derivation_shows_products.py` pins it, and it fails on run
+9's code with the defect quoted in the message.
+
+### The lesson
+
+**A checker that asks "is what is present correct?" cannot see what has
+stopped being present.** The arithmetic checker proved every printed
+expression evaluated to the value it claimed — 3,800 problems, all
+correct — while the corpus was quietly teaching less.
+
+Run 9 traded away the thing the model most needed to learn in order to
+fit a sequence-length cap, and the cap did not actually require the
+trade at 4×4. The measurement that would have prevented it: what does
+the FULL form cost at each size? One step per entry at 4×4 is 983
+tokens against a 1,536 cap.
+
+**Corollary:** when a change is made to fit a limit, measure the limit at
+EVERY size the change touches, not at the size that failed. Run 9
+measured 5×5, applied the fix to 4×4 as well, and lost 26 problems.

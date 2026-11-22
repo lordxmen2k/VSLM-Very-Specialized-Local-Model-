@@ -307,6 +307,42 @@ Run 9 also fixes what run 8 got wrong, and what run 8 got right:
 `tests/test_size_mix.py` and `tests/test_corpus_stability.py` pin all of
 it. Both fail on run 8's code, with the measured numbers in the message.
 
+### Run 9's score was 225/660 = 34.1% — and the cause was one line of format
+
+The run used the right code: the pull fast-forwarded to `36d1bbc`, the
+contract check printed the size-mix table, and corpus generation ran at
+1,268/s against run 8's 373/s. And the score fell to **225/660 = 34.1%**,
+below run 8's 250/660.
+
+The training loss said it was coming: run 9's loss@200 was **0.0761**,
+the highest of any run (run 7's best was 0.0542).
+
+The cause was `matrix_power`, which fell from 41/60 to **15/60** — more
+problems than the whole regression. Run 9 had shortened the dot product
+to fit the 1,536-token sequence cap:
+
+```
+full:     4*4 + (-4)*(-4) + 3*3 + 0*0 = 16 + 16 + 9 + 0 = 41
+compact:                        16 + 16 + 9 + 0 = 41
+```
+
+The compact form drops the **products**. The model is shown the partial
+sums and never the multiplication that produced each term, so it learns
+to emit a number it cannot compute.
+
+And the arithmetic checker could not see it — it validates the expression
+on the *left* of each `=`, and a compact line is perfectly well formed
+and perfectly well valued. **3,800 problems, every expression correct,
+and the corpus quietly teaching less.**
+
+The measurement that would have prevented it: the full form fits the cap
+at 4×4 in **983 tokens** against 1,536. Run 9 measured 5×5, applied the
+fix to 4×4 as well, and lost 26 problems. Run 10 restores the full dot
+product at 3×3 and 4×4 and keeps the reduced form at 5×5 only.
+
+`tests/test_derivation_shows_products.py` pins it, and fails on run 9's
+code with the defect quoted in the message.
+
 ---
 
 ## Five decisions that shape everything
