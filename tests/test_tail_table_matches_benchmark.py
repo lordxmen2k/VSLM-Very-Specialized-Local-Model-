@@ -25,7 +25,7 @@ CACHE = os.path.join(REPO, "tests", "_cache")
 
 sys.path.insert(0, os.path.join(REPO, "src"))
 
-from la.benchprompt_tails import PROMPT_TAILS
+from la.benchprompt_tails import PROMPT_TAILS_BY_SIZE
 
 
 def _tails_from_the_benchmark():
@@ -45,7 +45,12 @@ def _tails_from_the_benchmark():
                         idx = i + 1
                 tail = [l for l in lines[idx:] if l]
                 key = (row["Subcat"], size)
-                out.setdefault(key, Counter())["\n\n".join(tail)] += 1
+                # The method instruction and the closing instruction are
+                # ONE paragraph separated by a single NEWLINE in the
+                # benchmark's files. The corpus used to join them with a
+                # blank line, and the nullity entry had two newlines
+                # where the benchmark has one.
+                out.setdefault(key, Counter())["\n".join(tail)] += 1
     return out
 
 
@@ -57,14 +62,15 @@ class TestTheTailTableMatchesTheBenchmark(unittest.TestCase):
             self.skipTest("benchmark files not fetched")
         for (subcat, size), counter in sorted(data.items()):
             with self.subTest(subcat=subcat, size=size):
-                tails = PROMPT_TAILS.get(subcat)
+                tails = PROMPT_TAILS_BY_SIZE.get(subcat, {}).get(size)
                 self.assertIsNotNone(
-                    tails, f"the corpus has no prompt tails for {subcat}")
+                    tails, f"the corpus has no prompt tails for "
+                           f"{subcat} at {size}")
                 # the corpus's tails, as the benchmark would render them
                 have = Counter()
                 for method, closing, weight in tails:
                     parts = [p for p in (method, closing) if p]
-                    have["\n\n".join(parts)] += weight
+                    have["\n".join(parts)] += weight
                 # only the tails that actually occur at this size matter
                 want = Counter()
                 for tail, n in counter.items():
@@ -82,12 +88,13 @@ class TestTheTailTableMatchesTheBenchmark(unittest.TestCase):
             self.skipTest("benchmark files not fetched")
         for (subcat, _size), counter in sorted(data.items()):
             with self.subTest(subcat=subcat):
-                tails = PROMPT_TAILS.get(subcat)
-                self.assertIsNotNone(tails)
                 have = set()
-                for method, closing, _weight in tails:
-                    parts = [p for p in (method, closing) if p]
-                    have.add("\n\n".join(parts))
+                for _size, entries in PROMPT_TAILS_BY_SIZE.get(
+                        subcat, {}).items():
+                    for method, closing, _weight in entries:
+                        parts = [p for p in (method, closing) if p]
+                        have.add("\n".join(parts))
+                self.assertTrue(have)
                 for tail, n in counter.items():
                     self.assertIn(
                         tail, have,
@@ -101,20 +108,23 @@ class TestTheTailTableMatchesTheBenchmark(unittest.TestCase):
         data = _tails_from_the_benchmark()
         if not data:
             self.skipTest("benchmark files not fetched")
-        for subcat, tails in sorted(PROMPT_TAILS.items()):
+        for subcat, per_size in sorted(PROMPT_TAILS_BY_SIZE.items()):
             with self.subTest(subcat=subcat):
                 used = set()
                 for (s, _size), counter in data.items():
                     if s != subcat:
                         continue
                     used.update(counter)
-                for method, closing, _weight in tails:
-                    parts = [p for p in (method, closing) if p]
-                    tail = "\n\n".join(parts)
-                    self.assertIn(
-                        tail, used,
-                        f"{subcat}: the corpus produces a tail the benchmark "
-                        f"never uses: {tail!r}")
+                for _size, entries in per_size.items():
+                    for method, closing, _weight in entries:
+                        parts = [p for p in (method, closing) if p]
+                        tail = "\n".join(parts)
+                        if not tail:
+                            continue
+                        self.assertIn(
+                            tail, used,
+                            f"{subcat}: the corpus produces a tail the "
+                            f"benchmark never uses: {tail!r}")
 
 
 if __name__ == "__main__":

@@ -337,11 +337,68 @@ and the corpus quietly teaching less.**
 
 The measurement that would have prevented it: the full form fits the cap
 at 4×4 in **983 tokens** against 1,536. Run 9 measured 5×5, applied the
-fix to 4×4 as well, and lost 26 problems. Run 10 restores the full dot
-product at 3×3 and 4×4 and keeps the reduced form at 5×5 only.
+fix to 4×4 as well, and lost 26 problems.
 
 `tests/test_derivation_shows_products.py` pins it, and fails on run 9's
 code with the defect quoted in the message.
+
+### Run 11 — the 1,536-token cap was never real, and the determinant was
+### taught to emit numbers it could not compute
+
+Run 10 measured **276/660 = 41.8%** against the base model's 306/660, and
+the per-family table said exactly what the request said: everything
+except trace and transpose was weak, and the determinant was at **1 of
+150** against the base model's 54 of 150.
+
+Run 11 fixed nine separate causes. Three of them are worth stating here
+because they are the kind of thing that is invisible until it is
+measured.
+
+**The cap that justified dropping the products was a character count
+divided by a heuristic.** `MAX_SEQ_LEN = 1536` was enforced nowhere; the
+real cap is `max_seq_len: 2048` in `configs/default.yaml`. The corpus's
+length is now measured in **real tokens**, with the model's own
+tokenizer — a faithful BPE over the model's `tokenizer.json`, in
+`scripts/qwen_bpe.py`. With the products shown at 5×5 the longest example
+is **2,042 tokens**, inside 2,048, and **none of 800** sampled examples
+is over. The 5×5 exception cost the matrix_power family 26 problems and
+was never needed. It takes four measured changes to get there: grouping
+the 5×5 entries by row, the short `(1,1) =` label, no parentheses around
+negative factors, and the plot spec storing whole numbers as whole
+numbers.
+
+**The determinant's cofactor minors were asserted, not computed.**
+
+```
+the first minor is egin{bmatrix} 4 & -1 \ 5 & 1 \end{bmatrix} = 9
+```
+
+The model was shown the minor's value and never the arithmetic that
+produced it — taught to emit a number it could not compute, which is run
+9's lesson in a different family. It is now
+`= 4*1 - (-1)*5 = 4 - -5 = 9`. The elimination route used fractions in
+every 4×4 and 5×5 determinant, and the benchmark uses **no fractions at
+all** — 0 of its 660 problems and 0 of its 660 answers contain one — so
+the elimination is now the fraction-free Bareiss form.
+
+**The corpus could not produce a full-rank matrix.** The rank was drawn
+from 1 to n−1, so a full-rank matrix was impossible, and the benchmark's
+most common 3×3 rank answer is 3. The corpus's rank distribution was the
+benchmark's shifted one rank down. The rank and nullity families were the
+two that LOST to the base model, and they are the two whose corpus was
+missing a whole rank.
+
+The rest: the task statement is now the benchmark's own, verbatim, per
+(family, size) — including the 4×4 shape, which is the **scorer's**
+reconstruction rather than the file's bare matrix; the prompt tail is
+size-specific and the method and closing instructions are one paragraph
+as the benchmark has them; the prompt decoration draws from its own
+stream so a change to the prompt contract can no longer rewrite every
+matrix after it; and the eigenvalue's characteristic polynomial is
+LaTeX (`\lambda^{3}`) rather than Python (`lambda**3`), with the roots
+found rather than asserted.
+
+`WORKING_STATE.md` has the measurements and the reasoning for each.
 
 ---
 

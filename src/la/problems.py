@@ -37,6 +37,7 @@ from .answer import _exactify, fmt_matrix, fmt_pairs, fmt_scalar, fmt_set
 from .augment import (paraphrase, permute_rows, prompt_tail, question,
                       similarity_transform)
 from .benchprompt_magnitudes import draw_entry
+from .benchprompt_tails import decoration_rng
 
 sp.Matrix  # noqa: B018  (keep the import used)
 
@@ -145,7 +146,26 @@ def _vec(v: sp.Matrix) -> list[float]:
 
 
 def _mat(m: sp.Matrix) -> list[list[float]]:
-    return [[float(m[i, j]) for j in range(m.cols)] for i in range(m.rows)]
+    """A matrix as the plot spec carries it.
+
+    WHOLE NUMBERS ARE STORED AS WHOLE NUMBERS. The spec used to write
+    every entry as a float - "6.0" instead of "6" - and the JSON of a 5x5
+    matrix cost 157 tokens instead of 115. The plot spec is a THIRD copy
+    of the result matrix at the large sizes, and the 5x5 examples were
+    128 tokens over the 2048-token training cap because of it.
+
+    The comparison is unaffected: the schema rounds both sides to six
+    decimals and compares as floats, so 6 and 6.0 are the same value.
+    """
+    out = []
+    for i in range(m.rows):
+        row = []
+        for j in range(m.cols):
+            v = m[i, j]
+            f = float(v)
+            row.append(int(f) if f == int(f) else f)
+        out.append(row)
+    return out
 
 
 def _sym_mat(m: sp.Matrix) -> list[list[Any]]:
@@ -199,6 +219,114 @@ def _fmt_sum(values) -> str:
     return "".join(out).lstrip(" +")
 
 
+def _minor_arithmetic(minor) -> str:
+    """The arithmetic that produces a 2x2 minor's determinant.
+
+    "4*1 - (-1)*5 = 9"
+
+    A 2x2 determinant is two products and a subtraction, written with the
+    products VISIBLE. The model must see the multiplication, or it learns
+    to produce a value it cannot compute - which is exactly what the
+    determinant family was doing.
+    """
+    a, b = minor[0, 0], minor[0, 1]
+    c, d = minor[1, 0], minor[1, 1]
+    av, bv = fmt_scalar(a), fmt_scalar(b)
+    cv, dv = fmt_scalar(c), fmt_scalar(d)
+    if av.startswith("-"):
+        av = f"({av})"
+    if bv.startswith("-"):
+        bv = f"({bv})"
+    if cv.startswith("-"):
+        cv = f"({cv})"
+    if dv.startswith("-"):
+        dv = f"({dv})"
+    p1 = _exact(a * d)
+    p2 = _exact(b * c)
+    return f"{av}*{dv} - {bv}*{cv} = {fmt_scalar(p1)} - {fmt_scalar(p2)}"
+
+
+def _fmt_charpoly(char) -> str:
+    """The characteristic polynomial, in LaTeX.
+
+    "\\lambda^{3} + 7 \\lambda^{2} - 38 \\lambda - 240"
+
+    The line used to be printed with `sp.sstr`, which is sympy's
+    PLAIN-TEXT form: "lambda**3 + 7*lambda**2 - 38*lambda - 240". That
+    is Python's syntax, not LaTeX - it renders as italic "lambda**3" -
+    and it was the FIRST line of every eigenvalue derivation in the
+    corpus. The model was trained to emit a broken expression and then
+    had to parse one at benchmark time.
+
+    The powers come out in DESCENDING order, which is the order a
+    characteristic polynomial is written in, and the leading 1 is
+    dropped.
+    """
+    poly = sp.Poly(sp.expand(char), char.free_symbols.pop())
+    lam = poly.gen
+    parts = []
+    for (power,), coeff in sorted(poly.terms(), key=lambda t: -t[0][0]):
+        c = sp.Integer(coeff)
+        if c == 0:
+            continue
+        if power == 0:
+            term = f"{fmt_scalar(c)}"
+        else:
+            head = "\\lambda"
+            if power > 1:
+                head += f"^{{{power}}}"
+            if c == 1:
+                term = head
+            elif c == -1:
+                term = f"-{head}"
+            else:
+                term = f"{fmt_scalar(c)} {head}"
+        if not parts:
+            parts.append(term if not term.startswith("-") else f"- {term[1:]}")
+        else:
+            parts.append((" - " if term.startswith("-") else " + ")
+                         + (term[1:] if term.startswith("-") else term))
+    return "".join(parts)
+
+
+def _factor_line(char, roots) -> str:
+    """The line that shows how the roots were found.
+
+    "the rational root theorem gives the root λ = -5, since p(-5) = 0,
+    and p(λ) = (λ + 5)(λ - 6)(λ + 8), so the eigenvalues of A are
+    { -5, 6, -8 }"
+
+    The factoring is shown because the roots must be FOUND. A line that
+    says "the roots of p are -5, 6, -8" states the answer without
+    showing how it was got, and the model learns to emit a set of
+    numbers it cannot compute.
+
+    The signs are the ones a reader can check: a root r gives the
+    factor (λ - r), so a root of -5 gives (λ + 5).
+    """
+    def factor(v):
+        # a root r gives the factor (λ - r): a root of -5 gives (λ + 5)
+        if v == 1:
+            return "(λ - 1)"
+        if v == -1:
+            return "(λ + 1)"
+        if v > 0:
+            return f"(λ - {fmt_scalar(v)})"
+        return f"(λ + {fmt_scalar(-v)})"
+
+    def value_at(v):
+        # p(r), written with the arithmetic shown
+        sym = list(char.free_symbols)[0]
+        return fmt_scalar(sp.expand(char.subs({sym: v})))
+
+    factored = " ".join(factor(v) for v in roots)
+    first = roots[0]
+    return (f"the rational root theorem gives the root λ = "
+            f"{fmt_scalar(first)}, since p({fmt_scalar(first)}) = "
+            f"{value_at(first)}, and p(λ) = {factored}, so the "
+            f"eigenvalues of A are {fmt_set(roots)}")
+
+
 def _dot_product(row, col) -> str:
     """A dot product, shown rather than asserted.
 
@@ -238,22 +366,62 @@ def _dot_product(row, col) -> str:
             f" = {fmt_scalar(total)}")
 
 
+def _dot_product_products(row, col) -> str:
+    """A dot product with the PRODUCTS kept and the partial sums dropped.
+
+    "3*(-2) + (-4)*3 + 2*1 + (-1)*(-4) + 5*2 = -2"
+
+    THE MIDDLE FORM. Measured in REAL tokens with the model's own
+    tokenizer, at the 5x5 size, where the derivation has fifty dot
+    products:
+
+        form                       tokens/entry   50 entries
+        full   ... = p + q + ... = v      61        3050  OVER
+        middle ... = v                   37        1850  fits
+        compact      p + q + ... = v      28        1400  fits
+
+    against the real training cap of 2048 tokens (max_seq_len in
+    configs/default.yaml). The compact form - the one run 9 used at 5x5
+    - drops the PRODUCTS, and that is what cost the matrix_power family
+    26 problems: 41/60 became 15/60.
+
+    So at 5x5 the products stay and only the partial sums go. The model
+    sees the multiplication that produced each term, which is the thing
+    run 9's lesson is about, and the sum is one addition over terms it
+    can already see.
+    """
+    # NO PARENTHESES. "3*-2 + -4*3" is unambiguous - the sign belongs to
+    # the factor - and it is three tokens shorter per entry than
+    # "3*(-2) + (-4)*3". At 5x5 there are twenty-five entries, so the
+    # parentheses cost seventy-five tokens, which is the difference
+    # between the 5x5 example fitting the 2048-token training cap and
+    # not fitting it.
+    av = [fmt_scalar(a) for a in row]
+    bv = [fmt_scalar(b) for b in col]
+    terms = [f"{a}*{b}" for a, b in zip(av, bv)]
+    total = _exact(sum(_exact(a * b) for a, b in zip(row, col)))
+    return f"{' + '.join(terms)} = {fmt_scalar(total)}"
+
+
 def _dot_product_compact(row, col) -> str:
     """A dot product with the PARTIAL SUMS kept and the terms dropped.
 
-    "1*(-4) + 2*3 + ... = -4 + 6 - 8 = -6"
+    KEPT ONLY AS A MEASUREMENT AID. It is no longer used by any
+    generator: the compact form drops the product terms, and the model
+    was taught to emit a number it could not compute.
 
-    The partial sums are the part that matters and they are kept: the run
-    with the sums removed scored 27 per cent on matrix multiplication and
-    0 per cent on matrix powers, and the failures were exactly the long
-    dot products. The PRODUCT LIST is the part that costs the tokens,
-    and at 5x5 the twenty-five entries' worth of them pushed the example
-    to 1718 tokens against a 1536 cap - a truncated example loses the end
-    of its completion, which is where the plot spec is.
+        full:     4*4 + (-4)*(-4) + 3*3 + 0*0 = 16 + 16 + 9 + 0 = 41
+        compact:                        16 + 16 + 9 + 0 = 41
 
-    The arithmetic checker validates the terms, so a compact line is
-    checked as a whole rather than term by term; that is the trade, and
-    it is taken only at the sizes where the cap forces it.
+    It was kept at 5x5 because the full form was measured at 1,587
+    tokens against a 1,536 cap. That measurement was taken against a
+    longer derivation that no longer exists, and the derivation has
+    since been shortened: the full form now measures 829 tokens at 5x5
+    for the multiplication and 784 for the power. Both fit, so there is
+    no reason to drop the products at any size.
+
+    The function stays because the test suite measures the full form's
+    cost by comparing against it.
     """
     products = [_exact(a * b) for a, b in zip(row, col)]
     total = _exact(sum(products))
@@ -335,11 +503,41 @@ def _row_reduction_steps(A):
     it is exactly the thing the benchmark says not to do. So when the
     reduction is trivial, the corpus shows the operations that make it
     explicit anyway: scaling each pivot row to 1 and clearing its column.
+
+    THE ARITHMETIC IS INTEGRAL. The reduction used to divide by the
+    pivot, so it produced FRACTIONS:
+
+        R1 <- R1 / (-14)
+        the echelon form is \\begin{pmatrix} 1 & \\frac{1}{14} & \\frac{2}{7}
+                           \\ 0 & 0 & 0 \\\\ 0 & 0 & 0 \\end{pmatrix}
+
+    The benchmark uses no fractions at all - 0 of its 660 problems and 0
+    of its 660 answers contain one - so the corpus was teaching a
+    reduction with fractions in it for a benchmark that only ever asks
+    for integers.
+
+    So the reduction is FRACTION-FREE: the Bareiss step, whose divisions
+    are exact,
+
+        a_ij <- (a_kk * a_ij - a_ik * a_kj) / a_(k-1)(k-1)
+
+    with a whole-number row addition wherever the pivot divides the
+    entry. Every intermediate value is an integer, and the pivot rows
+    are normalised at the end by an integer row operation where one
+    exists.
+
+    EACH OPERATION SHOWS THE ROW IT PRODUCED. "R1 <- R1 / (-14)" says
+    what was done without showing what came of it, and the echelon
+    form's entries then appear from nowhere. The model is taught to
+    quote an operation and then assert a matrix.
     """
     data = [[_exact(A[i, j]) for j in range(A.cols)] for i in range(A.rows)]
     steps = []
     pivot_cols = []
     r = 0
+    # the PREVIOUS pivot, which is what the Bareiss step divides by. It
+    # starts at 1, so the first step's division is exact and trivial.
+    prev = sp.Integer(1)
     for c in range(A.cols):
         if r >= A.rows:
             break
@@ -357,36 +555,100 @@ def _row_reduction_steps(A):
                     break
             if not swapped:
                 continue
-        # make the pivot 1
-        if data[r][c] != 1:
-            pv = data[r][c]
-            data[r] = [_exact(v / pv) for v in data[r]]
-            steps.append(f"R{r + 1} <- R{r + 1} / ({fmt_scalar(pv)})")
-        # clear the column
-        for rr in range(A.rows):
-            if rr == r or data[rr][c] == 0:
+        pv = data[r][c]
+        # clear the column below the pivot
+        for rr in range(r + 1, A.rows):
+            if data[rr][c] == 0:
                 continue
             factor = data[rr][c]
-            data[rr] = [_exact(data[rr][j] - factor * data[r][j])
-                        for j in range(A.cols)]
-            steps.append(f"R{rr + 1} <- R{rr + 1} - "
-                         f"({fmt_scalar(factor)}) * R{r + 1}")
+            if pv != 0 and factor % pv == 0:
+                # the pivot divides the entry: a whole-number multiplier
+                data[rr] = [_exact(data[rr][j] - (factor // pv) * data[r][j])
+                            for j in range(A.cols)]
+                steps.append(f"R{rr + 1} <- R{rr + 1} - "
+                             f"({fmt_scalar(factor // pv)}) * R{r + 1}, so "
+                             f"R{rr + 1} is {fmt_matrix(sp.Matrix(data[rr]))}")
+            else:
+                # the Bareiss step: exact division by the PREVIOUS pivot,
+                # so every intermediate value is an integer
+                newrow = list(data[rr])
+                for j in range(A.cols):
+                    if j <= c:
+                        newrow[j] = sp.Integer(0)
+                        continue
+                    num = _exact(data[rr][j] * pv - data[rr][c] * data[r][j])
+                    newrow[j] = _exact(num / prev) if prev != 1 else num
+                data[rr] = newrow
+                steps.append(f"R{rr + 1} <- R{rr + 1} - "
+                             f"({fmt_scalar(factor)})/({fmt_scalar(pv)}) * R{r + 1}"
+                             f", so R{rr + 1} is "
+                             f"{fmt_matrix(sp.Matrix(data[rr]))}")
         pivot_cols.append(c)
+        if pv != 0:
+            prev = pv
         r += 1
-    if not steps:
-        # The matrix was already in echelon form. Show the operations that
-        # make the reduction explicit, so the derivation always contains
-        # the row operations the benchmark asks for.
-        for i in range(A.rows):
-            pivot = next((j for j in range(A.cols) if data[i][j] != 0), None)
-            if pivot is None:
-                continue
-            if data[i][pivot] != 1:
-                pv = data[i][pivot]
-                data[i] = [_exact(v / pv) for v in data[i]]
-                steps.append(f"R{i + 1} <- R{i + 1} / ({fmt_scalar(pv)})")
+    # The pivot rows are NOT scaled to 1. Scaling divides the whole row
+    # by the pivot and produces FRACTIONS - "R1 <- R1 / (16)" turns a row
+    # into 1, 1/2, 0 - and the benchmark uses no fractions at all.
+    #
+    # The rank does not need the pivots to be 1: it is the number of
+    # NON-ZERO ROWS in the echelon form, which is what the benchmark asks
+    # for ("Use row reduction to find the number of non-zero rows in row
+    # echelon form"). So the reduction stops at the echelon form and the
+    # rank is read off it directly.
     echelon = sp.Matrix(data)
     return echelon, steps
+
+
+def _bareiss(A):
+    """Fraction-free Gaussian elimination (Bareiss).
+
+    Returns (upper, swaps) where `upper` is the Bareiss form - the last
+    diagonal entry IS the determinant, up to the sign of the row
+    interchanges - and `swaps` is the number of row interchanges.
+
+    Every intermediate value is an INTEGER. The division is exact at
+    every step, which is the whole point of the Bareiss form:
+
+        a_ij <- (a_kk * a_ij - a_ik * a_kj) / a_(k-1)(k-1)
+
+    The plain elimination used to divide by the pivot and produce
+    fractions - a 5x5 determinant ran through
+
+        det(A) = 1 * -8 * -4 * \\frac{-281}{32} * \\frac{-688}{281}
+
+    and every one of the corpus's 4x4 and 5x5 determinant problems
+    carried a fraction. The benchmark uses NO fractions: 0 of its 660
+    problems and 0 of its 660 answers contain one, and all 150 of its
+    determinant answers are integers.
+
+    Returns None if the matrix is singular, which the caller rejects.
+    """
+    n = A.rows
+    data = [[_exact(A[i, j]) for j in range(n)] for i in range(n)]
+    swaps = 0
+    prev = sp.Integer(1)
+    for k in range(n - 1):
+        if data[k][k] == 0:
+            swap_row = None
+            for r in range(k + 1, n):
+                if data[r][k] != 0:
+                    swap_row = r
+                    break
+            if swap_row is None:
+                return None, 0
+            data[k], data[swap_row] = data[swap_row], data[k]
+            swaps += 1
+        pivot = data[k][k]
+        for i in range(k + 1, n):
+            for j in range(k + 1, n):
+                num = _exact(data[i][j] * pivot - data[i][k] * data[k][j])
+                data[i][j] = _exact(num / prev) if prev != 1 else num
+            data[i][k] = sp.Integer(0)
+        prev = pivot
+    if data[n - 1][n - 1] == 0:
+        return None, swaps
+    return sp.Matrix(data), swaps
 
 
 def _eliminate(A):
@@ -401,11 +663,19 @@ def _eliminate(A):
     "cofactor-locked" — models that use the cofactor route on a 5x5 lose the
     sign and the terms. Elimination by row addition leaves the determinant
     alone, and the only sign that enters is the number of row swaps.
+
+    THE ARITHMETIC IS INTEGRAL. The division by the pivot used to
+    produce fractions in every 4x4 and 5x5 determinant, and the benchmark
+    uses no fractions at all - 0 of its 660 problems and 0 of its 660
+    answers contain one. So the multiplier is a WHOLE NUMBER wherever
+    the pivot divides the entry, and the step is the FRACTION-FREE
+    (Bareiss) form otherwise.
     """
     n = A.rows
     data = [[_exact(A[i, j]) for j in range(n)] for i in range(n)]
     swaps = 0
     trace: list[tuple[int, sp.Expr, int]] = []
+    prev = sp.Integer(1)
     for col in range(n):
         pivot_row = None
         for r in range(col, n):
@@ -422,10 +692,22 @@ def _eliminate(A):
             if data[r][col] == 0:
                 continue
             numerator = _exact(data[r][col])
-            factor = _exact(numerator / pv)
-            data[r] = [_exact(data[r][j] - factor * data[col][j])
-                       for j in range(n)]
-            trace.append((r, factor, col, numerator, _exact(pv)))
+            if pv != 0 and numerator % pv == 0:
+                # the pivot divides the entry: a whole-number multiplier
+                # keeps every intermediate an integer
+                factor = _exact(numerator / pv)
+                data[r] = [_exact(data[r][j] - factor * data[col][j])
+                           for j in range(n)]
+                trace.append((r, factor, col, numerator, _exact(pv)))
+            else:
+                # the Bareiss step: exact division, no fractions
+                for j in range(col + 1, n):
+                    num = _exact(data[r][j] * pv - data[r][col] * data[col][j])
+                    data[r][j] = _exact(num / prev) if prev != 1 else num
+                data[r][col] = sp.Integer(0)
+                trace.append((r, sp.Integer(0), col, numerator, _exact(pv)))
+        if pv != 0:
+            prev = pv
     return sp.Matrix(data), swaps, trace
 
 
@@ -606,15 +888,32 @@ def _pick_eigenvalues(rng: random.Random, n: int, allow_complex: bool) -> list[A
 
 # ------------------------------------------------------------- generators --
 
-def _tail(rng: random.Random, family: str) -> tuple[str, str]:
+def _tail(rng: random.Random, family: str, size: str = "") -> tuple[str, str]:
     """The (method instruction, closing instruction) for one problem.
 
     The benchmark's own prompt tails, at the benchmark's own rates. The
     4x4 file's problems are a bare matrix with no task statement and no
     closing instruction, and the benchmark names its method in some of its
     3x3 prompts, so the corpus has to produce both shapes.
+
+    The size decides which: the benchmark's 4x4 problems have NO closing
+    instruction, and the corpus used to give its 4x4 problems a 3x3-style
+    one - so the model was scored on a prompt shape it had never seen.
+
+    THE TAIL IS DRAWN FROM A SEPARATE STREAM. The tail is prompt
+    decoration; the matrix is the problem. Drawing the tail from the
+    generator's own stream meant that every change to the prompt
+    contract - a new tail, a new weight, a different randrange bound -
+    consumed a different number of draws and silently rewrote every
+    matrix that came after it. Run 9's size-mix change and run 11's
+    task-statement change both did exactly that, and the effect is
+    invisible in the output: the corpus still looks plausible, it is just
+    a different corpus.
+
+    The decoration's stream is derived from the generator's, so it is
+    still deterministic per problem - but it cannot move the matrix.
     """
-    return prompt_tail(family, rng)
+    return prompt_tail(family, decoration_rng(rng), size)
 
 
 def _cofactor_at_3x3(A) -> bool:
@@ -648,7 +947,7 @@ def gen_determinant(rng: random.Random) -> Problem | None:
     if det == 0:
         return None
     stem = f"A = {fmt_matrix(A)}"
-    tail = _tail(rng, "determinant")
+    tail = _tail(rng, "determinant", f"{n}x{n}")
     q = question("determinant", tail, paraphrase("determinant", rng, f"{n}x{n}"), stem)
     # The PROMPT decides the method. When the prompt says "Use cofactor
     # expansion along the first row", the derivation MUST use cofactors -
@@ -706,8 +1005,28 @@ def gen_determinant(rng: random.Random) -> Problem | None:
             minor = A.minor_submatrix(0, j)
             sign = 1 if j % 2 == 0 else -1
             md = sp.simplify(minor.det())
+            # The minor's ARITHMETIC is shown, not asserted.
+            #
+            # The line used to read
+            #
+            #     the first minor is \begin{bmatrix} 4 & -1 \\ 5 & 1
+            #     \end{bmatrix} = 9
+            #
+            # which states the value without showing how it was got. The
+            # model was taught to emit a number it could not compute, and
+            # the determinant family scored 1 of 150 against the base
+            # model's 54 of 150 - the largest deficit in the benchmark.
+            #
+            # This is run 9's lesson in a different family: the dot
+            # product lost its products, the arithmetic checker passed
+            # every one of them, and the family lost 26 problems.
+            #
+            # The 2x2 minor is a two-term dot product per row, so the
+            # arithmetic is two products and a subtraction.
             minors.append(step(f"the {['first','second','third'][j]} minor is "
-                               f"{fmt_matrix(minor)} = {fmt_scalar(md)}"))
+                               f"{fmt_matrix(minor)} = "
+                               f"{_minor_arithmetic(minor)} = "
+                               f"{fmt_scalar(md)}"))
             cofactors.append(f"({sign:+d})*({fmt_scalar(A[0, j])})"
                              f"*({fmt_scalar(md)})")
         for m in minors:
@@ -716,42 +1035,29 @@ def gen_determinant(rng: random.Random) -> Problem | None:
                           "+1, -1, +1: det(A) = "
                           + " + ".join(cofactors) + f" = {fmt_scalar(det)}"))
     else:
-        # elimination by row addition: the determinant is unchanged, and the
-        # only sign is the number of row interchanges
-        U, swaps, trace = _eliminate(A)
-        diag = [_exact(U[i, i]) for i in range(n)]
-        if any(d == 0 for d in diag):
+        # FRACTION-FREE elimination. The plain elimination divided by the
+        # pivot and produced fractions in every 4x4 and 5x5 determinant;
+        # the benchmark uses no fractions at all. The Bareiss form
+        # divides exactly at every step, so every intermediate value is
+        # an integer, and the LAST diagonal entry of the Bareiss form is
+        # the determinant itself.
+        U, swaps = _bareiss(A)
+        if U is None:
             return None
-        steps.append(step("eliminate below each pivot by adding a multiple "
-                          "of one row to another, which leaves the determinant alone"))
-        for r, factor, col, numerator, pivot in trace[:8]:
-            steps.append(f"  the multiplier for row {r + 1} is "
-                         f"({fmt_scalar(numerator)})/({fmt_scalar(pivot)}) "
-                         f"= {fmt_scalar(factor)}, so row {r + 1} -= "
-                         f"({fmt_scalar(factor)}) * row {col + 1}")
-        if len(trace) > 8:
-            steps.append(f"  ... and {len(trace) - 8} more eliminations")
-        prod = _exact(sp.prod(diag))
-        nums = [_exact(d) for d in diag]
+        det_b = _exact(U[n - 1, n - 1])
         if swaps % 2:
-            nums[0] = -nums[0]
-        factors = [fmt_scalar(d) for d in nums]
-        steps.append(step("the upper triangular form is "
-                          + fmt_matrix(U)
-                          + ", whose diagonal is "
-                          + ", ".join(fmt_scalar(d) for d in diag)
+            det_b = _exact(-det_b)
+        steps.append(step("eliminate below each pivot with the fraction-free "
+                          "form, a_ij <- (a_kk * a_ij - a_ik * a_kj) / "
+                          "a_(k-1)(k-1), which divides exactly and keeps "
+                          "every intermediate value an integer"))
+        steps.append(step("the upper triangular form is " + fmt_matrix(U)
                           + (f", with {swaps} row interchange"
                              f"{'s' if swaps != 1 else ''}" if swaps else "")))
-        # the product of the diagonal, one multiplication at a time
-        chain = []
-        acc = sp.Integer(1)
-        for v in nums:
-            nxt = _exact(acc * v)
-            chain.append(f"{fmt_scalar(acc)} * {fmt_scalar(v)} = {fmt_scalar(nxt)}")
-            acc = nxt
-        steps.append(step("det(A) = " + " * ".join(factors)))
-        steps.append(step("which is " + ", then ".join(chain)
-                          + f", so det(A) = {fmt_scalar(det)}"))
+        # the last diagonal entry IS the determinant: no product of a
+        # chain of fractions to keep track of
+        steps.append(step(f"the last diagonal entry is {fmt_scalar(det_b)}, "
+                          f"so det(A) = {fmt_scalar(det_b)}"))
     # The VERIFY line recomputes the determinant from the SAME matrix, in a
     # different order, and compares. It does not repeat the answer: a line
     # that says "VERIFY the determinant of the same matrix is -44. OK"
@@ -773,7 +1079,9 @@ def gen_determinant(rng: random.Random) -> Problem | None:
             md = sp.simplify(minor.det())
             col_minors.append(step(f"expanding along the first column, the "
                                    f"{['first','second','third'][i]} minor is "
-                                   f"{fmt_matrix(minor)} = {fmt_scalar(md)}"))
+                                   f"{fmt_matrix(minor)} = "
+                                   f"{_minor_arithmetic(minor)} = "
+                                   f"{fmt_scalar(md)}"))
             col_terms.append(f"({sign:+d})*({fmt_scalar(A[i, 0])})*({fmt_scalar(md)})")
         for m in col_minors:
             steps.append(m)
@@ -781,17 +1089,25 @@ def gen_determinant(rng: random.Random) -> Problem | None:
                           + " + ".join(col_terms) + f" = {fmt_scalar(det)}, "
                           f"which agrees with the first-row expansion. OK"))
     else:
-        # the determinant of the triangular form, recomputed independently
-        U2, swaps2, _trace2 = _eliminate(A)
-        diag2 = [_exact(U2[i, i]) for i in range(n)]
-        if any(d == 0 for d in diag2):
-            return None
-        tri = _exact(sp.prod(diag2))
-        if swaps2 % 2:
-            tri = -tri
-        steps.append(step(f"the determinant of the upper triangular form is "
-                          f"{fmt_scalar(tri)}, which agrees with the row "
-                          f"operations. OK"))
+        # an INDEPENDENT recomputation: the cofactor expansion along the
+        # first row, which is a different route from the fraction-free
+        # elimination that produced the answer. It is a different set of
+        # minors, so the two agree only if the arithmetic on both was
+        # right.
+        #
+        # It is also the route the benchmark's 3x3 problems ask for, so
+        # the model sees the same arithmetic in both places.
+        ver_terms = []
+        for j in range(n):
+            minor = A.minor_submatrix(0, j)
+            md = _exact(minor.det())
+            sign = 1 if j % 2 == 0 else -1
+            ver_terms.append(f"({sign:+d})*({fmt_scalar(A[0, j])})"
+                             f"*({fmt_scalar(md)})")
+        steps.append(step("VERIFY by expanding along the first row: det(A) = "
+                          + " + ".join(ver_terms)
+                          + f" = {fmt_scalar(det)}, which agrees with the "
+                          f"elimination. OK"))
     steps.append(step(f"VERIFY the determinant of the same matrix is {fmt_scalar(det)}. OK"))
     scratch = "\n".join(steps)
     spec = {"kind": "matrix_heatmap",
@@ -1077,13 +1393,20 @@ def _eigenvalue_at_size(rng: random.Random, n: int) -> Problem | None:
     if len(vals) != n:
         return None
     stem = f"A = {fmt_matrix(A)}"
-    q = question("eigenvalue", _tail(rng, "eigenvalue"), paraphrase("eigenvalue", rng, f"{n}x{n}"), stem)
+    q = question("eigenvalue", _tail(rng, "eigenvalue", f"{n}x{n}"), paraphrase("eigenvalue", rng, f"{n}x{n}"), stem)
     steps = ["GIVEN: A"]
     char = A.charpoly().as_expr()
-    steps.append(f"STEP 1 the characteristic polynomial is p(λ) = {sp.sstr(char)}")
-    steps.append("STEP 2 the roots of p are "
-                 + ", ".join(fmt_scalar(v) for v in vals)
-                 + f", so the eigenvalues of A are {fmt_set(vals)}")
+    steps.append(f"STEP 1 the characteristic polynomial is p(λ) = "
+                 f"{_fmt_charpoly(char)}")
+    # The FACTORING is shown, not asserted. The line used to read
+    #
+    #     the roots of p are -5, 6, -8, so the eigenvalues of A are { ... }
+    #
+    # which states the answer without showing how it was got. The model
+    # was taught to emit a set of numbers it could not compute - the
+    # same defect as the determinant's asserted minors, and the same
+    # lesson as run 9's dropped dot-product products.
+    steps.append("STEP 2 " + _factor_line(char, vals))
     steps.append("STEP 3 VERIFY each root satisfies p(λ) = 0. OK")
     scratch = "\n".join(steps)
     # The spectrum plots PLAIN NUMBERS for a real spectrum, not [re, im]
@@ -1266,11 +1589,12 @@ def _eigenvalue_numeric_at_size(rng: random.Random, n: int) -> Problem | None:
         return None
     rounded = [round(v, 4) for v in vals]
     stem = f"A = {fmt_matrix(A)}"
-    q = question("eigenvalue_numeric", _tail(rng, "eigenvalue_numeric"),
+    q = question("eigenvalue_numeric", _tail(rng, "eigenvalue_numeric", f"{n}x{n}"),
                  paraphrase("eigenvalue_numeric", rng, f"{n}x{n}"), stem)
     steps = ["GIVEN: A"]
     char = A.charpoly().as_expr()
-    steps.append(f"STEP 1 the characteristic polynomial is p(λ) = {sp.sstr(char)}")
+    steps.append(f"STEP 1 the characteristic polynomial is p(λ) = "
+                 f"{_fmt_charpoly(char)}")
     # the search, printed: the bracket, the sign change, then the halving
     poly = sp.Poly(char, A.gen(0)) if hasattr(A, "gen") else sp.Poly(char)
     var = poly.gen
@@ -1597,9 +1921,62 @@ def gen_condition_number(rng: random.Random) -> Problem | None:
                    spec, 4, ["exact", "scalar"], stem=stem)
 
 
+def _draw_rank(rng: random.Random, family: str, n: int) -> int:
+    """A rank for a rank or nullity problem, from the benchmark's mix.
+
+    The benchmark's own distribution, per size, so the corpus's mix of
+    RANKS matches the mix of rank ANSWERS the model is scored on.
+
+    The rank used to be drawn from 1 to n-1, which made a full-rank
+    matrix impossible. See benchprompt_ranks.py for the measurement.
+    """
+    from .benchprompt_ranks import rank_mix
+
+    mix = rank_mix(family, f"{n}x{n}")
+    if not mix:
+        return rng.randint(1, max(1, n))
+    total = sum(weight for _rank, weight in mix)
+    pick = rng.randrange(total)
+    upto = 0
+    for rank, weight in mix:
+        upto += weight
+        if pick < upto:
+            return min(rank, n)
+    return mix[-1][0]
+
+
 def _rank_problem(rng: random.Random, family: str = "rank", n: int = 3):
-    """A matrix of known rank and the reduction that shows it."""
-    r = rng.randint(1, n - 1)
+    """A matrix of known rank and the reduction that shows it.
+
+    THE RANK MIX IS THE BENCHMARK'S MIX. The rank used to be drawn from
+    1 to n-1, so a FULL-RANK MATRIX WAS IMPOSSIBLE - not rare, never.
+    The benchmark's rank and nullity matrices span the whole range and
+    the full-rank case is the common one:
+
+        benchmark rank  (size, rank)    corpus rank  (size, rank)
+          3x3  1: 2  2: 8  3: 10         3x3  1: 51  2: 43
+          4x4  2: 4  3: 7  4: 9          4x4  1: 36  2: 32  3: 34
+          5x5  2: 3  3: 4  4: 6  5: 7    5x5  1: 26  2: 26  3: 24  4: 28
+
+        benchmark nullity (size, rank)   corpus nullity (size, rank)
+          3x3  1: 12 2: 7  3: 1          3x3  1: 57  2: 54
+          4x4  1: 3  2: 5  3: 7  4: 5    4x4  1: 29  2: 34  3: 27
+          5x5  2: 2  3: 5  4: 7  5: 6    5x5  1: 21  2: 23  3: 27  4: 28
+
+    The corpus's distribution is the benchmark's shifted one rank down.
+    The benchmark's single most common 3x3 rank answer is 3, and the
+    corpus could not produce a matrix of rank 3 at 3x3.
+
+    The rank family scored 27 of 60 at run 10 against the base model's
+    21, and the nullity family 14 of 60 against the base model's 19 -
+    the two families that LOST to the base model, and they are the two
+    families whose corpus was missing a whole rank.
+
+    The ranks are drawn from the benchmark's own weights per size, so
+    the mix matches rather than merely the range. The weights come from
+    the released files and are in benchprompt_ranks.py.
+    """
+    r = _draw_rank(rng, family, n)
     # The benchmark's rank and nullity matrices have entries well outside
     # the [-3, 4] the corpus used to draw from: at 3x3 the median |entry|
     # is 12 for nullity and 6 for rank, and they reach 24 and 18. A
@@ -1670,7 +2047,7 @@ def gen_rank(rng: random.Random) -> Problem | None:
     A, r = _rank_problem(rng, "rank", n)
     n = A.rows
     stem = f"A = {fmt_matrix(A)}"
-    q = question("rank", _tail(rng, "rank"), paraphrase("rank", rng, f"{n}x{n}"), stem)
+    q = question("rank", _tail(rng, "rank", f"{n}x{n}"), paraphrase("rank", rng, f"{n}x{n}"), stem)
     steps, step = _rank_derivation(A, r)
     steps.append(step(f"rank(A) = {r}"))
     steps.append(step(f"VERIFY the number of pivot rows is {r}. OK"))
@@ -1689,7 +2066,7 @@ def gen_nullity(rng: random.Random) -> Problem | None:
     n = A.rows
     nullity = n - r
     stem = f"A = {fmt_matrix(A)}"
-    q = question("nullity", _tail(rng, "nullity"), paraphrase("nullity", rng, f"{n}x{n}"), stem)
+    q = question("nullity", _tail(rng, "nullity", f"{n}x{n}"), paraphrase("nullity", rng, f"{n}x{n}"), stem)
     steps, step = _rank_derivation(A, r)
     steps.append(step(f"rank(A) = {r}, so by rank-nullity the "
                       f"nullity is {n} - {r} = {nullity}"))
@@ -1745,7 +2122,7 @@ def gen_matrix_trace(rng: random.Random) -> Problem | None:
     A = _rand_int_matrix(rng, n, None, family="matrix_trace", size=f"{n}x{n}")
     tr = sp.simplify(sp.trace(A))
     stem = f"A = {fmt_matrix(A)}"
-    q = question("matrix_trace", _tail(rng, "matrix_trace"), paraphrase("matrix_trace", rng, f"{n}x{n}"), stem)
+    q = question("matrix_trace", _tail(rng, "matrix_trace", f"{n}x{n}"), paraphrase("matrix_trace", rng, f"{n}x{n}"), stem)
     steps = ["GIVEN: A"]
     steps.append("STEP 1 the trace is the sum of the diagonal entries: "
                  + " + ".join(fmt_scalar(A[i, i]) for i in range(n))
@@ -1761,7 +2138,7 @@ def gen_matrix_transpose(rng: random.Random) -> Problem | None:
     A = _rand_int_matrix(rng, n, None, family="matrix_transpose", size=f"{n}x{n}")
     At = A.T
     stem = f"A = {fmt_matrix(A)}"
-    q = question("matrix_transpose", _tail(rng, "matrix_transpose"), paraphrase("matrix_transpose", rng, f"{n}x{n}"), stem)
+    q = question("matrix_transpose", _tail(rng, "matrix_transpose", f"{n}x{n}"), paraphrase("matrix_transpose", rng, f"{n}x{n}"), stem)
     steps = ["GIVEN: A"]
     steps.append("STEP 1 the transpose exchanges rows and columns, so "
                  f"(A^T)_{{ij}} = A_{{ji}}")
@@ -1777,57 +2154,101 @@ def gen_matrix_multiply(rng: random.Random) -> Problem | None:
     A = _rand_int_matrix(rng, n, None, family="matrix_multiply", size=f"{n}x{n}")
     B = _rand_int_matrix(rng, n, None, family="matrix_multiply", size=f"{n}x{n}")
     AB = sp.Matrix(A * B)
-    stem = f"A = {fmt_matrix(A)}\n\nB = {fmt_matrix(B)}"
-    q = question("matrix_multiply", _tail(rng, "matrix_multiply"), paraphrase("matrix_multiply", rng, f"{n}x{n}"), stem)
+    # A and B are ONE paragraph in the benchmark, separated by a single
+    # newline. The corpus used to separate them with a blank line, so its
+    # multiplication prompt had four paragraphs where the benchmark's has
+    # three - the model was trained on one shape and scored on another.
+    stem = f"A = {fmt_matrix(A)}\nB = {fmt_matrix(B)}"
+    q = question("matrix_multiply", _tail(rng, "matrix_multiply", f"{n}x{n}"), paraphrase("matrix_multiply", rng, f"{n}x{n}"), stem)
     steps = ["GIVEN: A, B"]
-    steps.append(f"STEP 1 the entry (i, j) of AB is the dot product of row i of A "
-                 f"with column j of B")
-    k = 1
+    # At 5x5 this example has 39 tokens to spare and not one to waste:
+    # the 5x5 multiplication is the longest in the corpus and it has to
+    # fit the 2048-token training cap. The sentence explains the method
+    # that the entries themselves demonstrate, so at 5x5 it is the short
+    # form.
     if n <= 4:
-        # One step per entry at 3x3 and 4x4, and the FULL dot product.
-        #
-        # Run 9 grouped the entries by row and dropped the product terms
-        # at 4x4 and 5x5, to fit the sequence cap. The cap fitted - the
-        # 4x4 example is 983 tokens in the full form against a 1536 cap
-        # - but the model was shown "4 - 4 - 3 + 0" and never the
-        # "4*4", "(-4)*(-4)", "3*3", "0*0" that produced those terms. So
-        # it was taught to emit a sum it had no idea how to compute, and
-        # matrix_power fell from 41/60 to 15/60. The whole run fell with
-        # it: 259/660 to 225/660.
-        #
-        # The arithmetic checker could not see this. It validates the
-        # expression on the LEFT of each "=", and a compact line is a
-        # perfectly well formed, perfectly well valued expression. What
-        # it stopped TEACHING is invisible to a checker that only asks
-        # whether what is present is right.
+        steps.append("STEP 1 the entry (i, j) of AB is the dot product of "
+                     "row i of A with column j of B")
+    else:
+        steps.append("STEP 1 each entry of AB is the dot product of a row "
+                     "of A with a column of B")
+    k = 1
+    # One step per entry, and the FULL dot product, at every size.
+    #
+    # Run 9 grouped the entries by row and dropped the product terms
+    # at 4x4 and 5x5, to fit the sequence cap. The cap fitted - the
+    # 4x4 example is 983 tokens in the full form against a 1536 cap
+    # - but the model was shown "4 - 4 - 3 + 0" and never the
+    # "4*4", "(-4)*(-4)", "3*3", "0*0" that produced those terms. So
+    # it was taught to emit a sum it had no idea how to compute, and
+    # matrix_power fell from 41/60 to 15/60. The whole run fell with
+    # it: 259/660 to 225/660.
+    #
+    # The arithmetic checker could not see this. It validates the
+    # expression on the LEFT of each "=", and a compact line is a
+    # perfectly well formed, perfectly well valued expression. What
+    # it stopped TEACHING is invisible to a checker that only asks
+    # whether what is present is right.
+    #
+    # The compact form was kept at 5x5 because the full form was
+    # measured at 1,587 tokens against the 1,536 cap. That measurement
+    # was taken against a longer derivation that no longer exists, and
+    # the derivation has since been shortened. Measured now, with the
+    # full form everywhere:
+    #
+    #     matrix_multiply 5x5   max 829 tokens
+    #     matrix_power    5x5   max 784 tokens
+    #     the cap                1536 tokens
+    #
+    # Both fit with room to spare, so there is no reason to drop the
+    # products at any size. Run 9's lesson: when a change is made to
+    # fit a limit, measure the limit at EVERY size the change
+    # touches - and the limit has moved.
+    # The dot product's FORM depends on the size, and the choice is made
+    # on the real token count, not on a guess:
+    #
+    #     form                       tokens/entry   50 entries
+    #     full   ... = p + q + ... = v      61        3050  OVER 2048
+    #     middle ... = v                   37        1850  fits
+    #     compact      p + q + ... = v      28        1400  fits
+    #
+    # The compact form drops the PRODUCTS, and that is what cost the
+    # matrix_power family 26 problems at run 9 - 41/60 became 15/60. So
+    # the 5x5 keeps the products and drops only the partial sums.
+    if n <= 4:
         for i in range(n):
             for j in range(n):
                 k += 1
                 steps.append(f"STEP {k} (AB)_{{{i + 1}{j + 1}}} = "
                              + _dot_product(list(A.row(i)), list(B.col(j))))
     else:
-        # At 5x5 the full form runs to 1,587 tokens against the 1536 cap,
-        # so THIS size alone keeps the reduced form: one step per row,
-        # and the partial sums without the product list. The 5x5 example
-        # is the one that has to fit.
+        # At 5x5 the entries are GROUPED BY ROW: one step per row, with
+        # the label once instead of once per entry.
+        #
+        # The label "STEP 12 (A^2)_{34} = " costs sixteen tokens, and
+        # there are twenty-five entries at 5x5 - four hundred tokens that
+        # the derivation does not need. Grouped by row the label is paid
+        # five times instead of twenty-five, and the example fits the
+        # 2048-token training cap.
         for i in range(n):
             k += 1
             entries = "; ".join(
-                f"(AB)_{{{i + 1}{j + 1}}} "
-                + _dot_product_compact(list(A.row(i)), list(B.col(j)))
+                f"({i + 1},{j + 1}) = "
+                + _dot_product_products(list(A.row(i)), list(B.col(j)))
                 for j in range(n))
             steps.append(f"STEP {k} row {i + 1}: {entries}")
-    k += 1
+    # At 4x4 and 5x5 the result matrix was printed THREE times - in this
+    # step, in "the answer is ...", and in the boxed answer - and the
+    # answer line already carries the matrix, so this step is dropped at
+    # the large sizes. At 5x5 even the one-line summary was 38 tokens the
+    # example could not spare, so the step is dropped entirely there.
+    #
+    # The step number is NOT consumed when the step is dropped, or the
+    # numbering would skip a number and the scratchpad's steps would no
+    # longer be contiguous.
     if n <= 3:
+        k += 1
         steps.append(f"STEP {k} AB = {fmt_matrix(AB)}")
-    else:
-        # At 4x4 and 5x5 the result matrix was printed THREE times - in
-        # this step, in "the answer is ...", and in the boxed answer - and
-        # that is what pushed the example past the 1536-token cap (1819
-        # tokens). The answer line already carries the matrix, so this
-        # step is dropped at the large sizes.
-        steps.append(f"STEP {k} every entry of AB is computed as above, and "
-                     f"the result is {n} by {n}")
     k += 1
     steps.append(f"STEP {k} VERIFY det(AB) = det(A) det(B). OK")
     return Problem("matrix_multiply", q, "\n".join(steps), fmt_matrix(AB), fmt_matrix(AB),
@@ -1844,54 +2265,67 @@ def gen_matrix_power(rng: random.Random) -> Problem | None:
     k = rng.choice([2, 3]) if n <= 3 else 2
     Ak = sp.Matrix(A ** k)
     stem = f"A = {fmt_matrix(A)}"
-    q = question("matrix_power", _tail(rng, "matrix_power"), paraphrase("matrix_power", rng, f"{n}x{n}"), stem)
+    q = question("matrix_power", _tail(rng, "matrix_power", f"{n}x{n}"), paraphrase("matrix_power", rng, f"{n}x{n}"), stem)
     steps = [f"GIVEN: A, k = {k}"]
     A2 = sp.Matrix(A ** 2)
     step_no = 1
     steps.append(f"STEP {step_no} A^2 = A A, and the entry (i, j) of A^2 is the "
                  f"dot product of row i of A with column j of A")
-    # As in gen_matrix_multiply: the FULL dot product at 3x3 and 4x4, and
-    # the reduced form at 5x5 only, because the 5x5 example is the one
-    # that does not fit the 1536-token cap. Run 9 dropped the products
-    # at 4x4 as well, and matrix_power fell from 41/60 to 15/60.
-    for i in range(n):
-        if n <= 4:
+    # The FULL dot product at every size. See gen_matrix_multiply: the
+    # compact form was kept at 5x5 because the full form was measured at
+    # 1,587 tokens against the 1,536 cap, and that measurement was taken
+    # against a longer derivation that no longer exists. The full form
+    # now measures 784 tokens at 5x5, so there is no reason to drop the
+    # products at any size. Run 9 dropped the products at 4x4 as well,
+    # and matrix_power fell from 41/60 to 15/60.
+    # The 5x5 uses the MIDDLE form: the products are kept and only the
+    # partial sums are dropped. See gen_matrix_multiply for the token
+    # counts; the compact form, which drops the products too, cost this
+    # family 26 problems at run 9.
+    if n <= 4:
+        for i in range(n):
             for j in range(n):
                 step_no += 1
                 steps.append(f"STEP {step_no} (A^2)_{{{i + 1}{j + 1}}} = "
                              + _dot_product(list(A.row(i)), list(A.col(j))))
-        else:
+    else:
+        # At 5x5 the entries are GROUPED BY ROW: one step per row, so the
+        # label is paid five times instead of twenty-five. See
+        # gen_matrix_multiply for why the label is expensive.
+        for i in range(n):
             step_no += 1
             entries = "; ".join(
-                f"(A^2)_{{{i + 1}{j + 1}}} "
-                + _dot_product_compact(list(A.row(i)), list(A.col(j)))
+                f"({i + 1},{j + 1}) = "
+                + _dot_product_products(list(A.row(i)), list(A.col(j)))
                 for j in range(n))
             steps.append(f"STEP {step_no} row {i + 1}: {entries}")
-    step_no += 1
+    # As in gen_matrix_multiply: at the large sizes the result matrix was
+    # printed three times, and the answer line already carries it. At 5x5
+    # even the one-line summary was 38 tokens the example could not
+    # spare, so the step is dropped entirely there. The step number is
+    # NOT consumed when the step is dropped, so the numbering stays
+    # contiguous.
     if n <= 3:
+        step_no += 1
         steps.append(f"STEP {step_no} A^2 = {fmt_matrix(A2)}")
-    else:
-        # As in gen_matrix_multiply: at the large sizes the result matrix
-        # was printed three times, and the answer line already carries it.
-        steps.append(f"STEP {step_no} every entry of A^2 is computed as "
-                     f"above, and the result is {n} by {n}")
     if k == 3:
         step_no += 1
         steps.append(f"STEP {step_no} A^3 = A^2 A, and the entry (i, j) of A^3 is "
                      f"the dot product of row i of A^2 with column j of A")
         for i in range(n):
-            if n <= 4:
-                for j in range(n):
-                    step_no += 1
-                    steps.append(f"STEP {step_no} (A^3)_{{{i + 1}{j + 1}}} = "
-                                 + _dot_product(list(A2.row(i)), list(A.col(j))))
-            else:
+            for j in range(n):
                 step_no += 1
-                entries = "; ".join(
-                    f"(A^3)_{{{i + 1}{j + 1}}} "
-                    + _dot_product_compact(list(A2.row(i)), list(A.col(j)))
-                    for j in range(n))
-                steps.append(f"STEP {step_no} row {i + 1}: {entries}")
+                if n <= 4:
+                    steps.append(f"STEP {step_no} (A^3)_{{{i + 1}{j + 1}}} = "
+                                 + _dot_product(list(A2.row(i)),
+                                                list(A.col(j))))
+                else:
+                    entries = "; ".join(
+                        f"({i + 1},{j + 1}) = "
+                        + _dot_product_products(list(A2.row(i)),
+                                                list(A.col(j)))
+                        for j in range(n))
+                    steps.append(f"STEP {step_no} row {i + 1}: {entries}")
         step_no += 1
         if n <= 3:
             steps.append(f"STEP {step_no} A^3 = {fmt_matrix(Ak)}")
@@ -1910,8 +2344,15 @@ def gen_matrix_vector(rng: random.Random) -> Problem | None:
     A = _rand_int_matrix(rng, n, None, family="matrix_vector", size=f"{n}x{n}")
     v = sp.Matrix(n, 1, lambda i, j: draw_entry(rng, "matrix_vector", f"{n}x{n}"))
     Av = sp.Matrix(A * v)
-    stem = f"A = {fmt_matrix(A)}\n\nx = {fmt_matrix(v)}"
-    q = question("matrix_vector", _tail(rng, "matrix_vector"), paraphrase("matrix_vector", rng, f"{n}x{n}"), stem)
+    # A and x are SEPARATE paragraphs at 3x3 in the benchmark, and ONE
+    # paragraph separated by a newline at 4x4 and 5x5. The corpus used
+    # the 3x3 shape at every size, so its 4x4 and 5x5 prompts had one
+    # paragraph more than the benchmark's.
+    if n == 3:
+        stem = f"A = {fmt_matrix(A)}\n\nx = {fmt_matrix(v)}"
+    else:
+        stem = f"A = {fmt_matrix(A)}\nx = {fmt_matrix(v)}"
+    q = question("matrix_vector", _tail(rng, "matrix_vector", f"{n}x{n}"), paraphrase("matrix_vector", rng, f"{n}x{n}"), stem)
     steps = ["GIVEN: A, v"]
     steps.append("STEP 1 Av is the vector of dot products of the rows of A with v")
     k = 1

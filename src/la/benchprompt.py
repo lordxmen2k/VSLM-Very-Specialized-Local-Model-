@@ -38,7 +38,38 @@ PREAMBLE = ("Solve this linear algebra problem. Show your work and give the "
 # cut short and the model learned to stop before the plot block. One
 # module holds it so the training default and the test that guards it cannot
 # drift apart.
-MAX_SEQ_LEN = 1536
+#
+# THE VALUE IS 2048, NOT 1536. The 1,536 came from a character-count
+# estimate - the corpus's length divided by 2.04 - which is not a token
+# count and was never checked against the tokenizer. The real cap is
+# `max_seq_len: 2048` in configs/default.yaml, and the trainer truncates
+# at that.
+#
+# The cost of the stale number was a real one: the 5x5 dot products were
+# measured at "1,601 tokens against a 1,536 cap", so they were taught in a
+# COMPACT form that dropped the product terms - the run 9 defect that cost
+# the matrix_power family 26 problems. Measured in REAL tokens with the
+# model's own tokenizer, the 5x5 examples with their products shown come
+# to 1,892 and 2,042 - inside 2048.
+#
+# It is read from the config so that the cap has ONE home.
+def _max_seq_len() -> int:
+    """The training cap, from the config that the trainer reads."""
+    import os
+
+    import yaml
+
+    repo = os.path.abspath(os.path.join(os.path.dirname(__file__),
+                                        "..", ".."))
+    try:
+        with open(os.path.join(repo, "configs", "default.yaml"),
+                  encoding="utf-8") as fh:
+            return int(yaml.safe_load(fh)["training"]["max_seq_len"])
+    except Exception:
+        return 2048
+
+
+MAX_SEQ_LEN = _max_seq_len()
 MAX_NEW_TOKENS = 2048
 
 BASE_SYSTEM = ("You are a precise mathematical assistant. "
@@ -177,17 +208,29 @@ def has_task(problem: str) -> bool:
 
 
 def task_for(subcat: str, size: str | None = None) -> str:
-    """The task statement for a subcategory, with the size filled in."""
+    """The task statement for a subcategory, with the size filled in.
+
+    The size is spelled with U+00D7, the way the benchmark spells it:
+    "Find the determinant of the 4×4 matrix A." This function
+    reconstructs the task for the benchmark's 4x4 problems, which are a
+    bare matrix with no task statement at all, and the model is scored on
+    what this returns. The corpus has to be trained on the SAME string,
+    so both sides use this one function.
+
+    (The corpus used to write "4x4" with an ASCII "x" while the
+    benchmark's own 3x3 and 5x5 statements use U+00D7 - so the model was
+    trained on one spelling and scored on another for the same family.)
+    """
     subcat = normalise_subcat(subcat)
     tpl = TASKS.get(subcat)
     if tpl is None:
         return BOXED_HINTS.get(subcat, "Give the final answer inside \\boxed{}.")
     if not size:
         return tpl.format(size="")
-    # accept either "4" or "4x4" and always spell it the way the benchmark
-    # does: "4x4"
+    # accept either "4" or "4x4" and always spell it the way the
+    # benchmark does: "4×4"
     dim = str(size).split("x")[0]
-    return tpl.format(size=f"{dim}x{dim}")
+    return tpl.format(size=f"{dim}×{dim}")
 
 
 def build_prompt(task: str, problem: str) -> str:

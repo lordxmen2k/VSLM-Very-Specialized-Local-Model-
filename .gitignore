@@ -15,3 +15,8 @@ venv/
 
 # the LinAlg-Bench CSVs the grading test downloads
 tests/_cache/
+
+# the model's tokenizer, fetched by `make tokenizer`. It is 11 MB of
+# vocabulary and it is not worth a repository; the length tests skip
+# without it.
+.cache/

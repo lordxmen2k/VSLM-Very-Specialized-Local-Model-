@@ -86,11 +86,38 @@ class TestProblems(unittest.TestCase):
         self.assertGreater(checked, 400)
 
     def test_augmentation_changes_the_question_but_not_the_answer(self):
+        """The task statement varies - but only where the benchmark allows
+        it to.
+
+        For a family the BENCHMARK SCORES the task statement is the
+        benchmark's own, verbatim, because the statement is deterministic
+        per (family, size) and the model is scored on that exact string.
+        One phrasing is the contract, not a bug.
+
+        For a family the benchmark does NOT score, the wording is still
+        chosen from this module's templates, and those must vary.
+        """
         from la.augment import paraphrase
+        from la.benchprompt import FAMILY_TO_SUBCAT
+
         rng = random.Random(5)
+        scored = {f for f, s in FAMILY_TO_SUBCAT.items()}
         questions = {paraphrase("determinant", rng, "3x3") for _ in range(40)}
-        self.assertGreaterEqual(len(questions), 3,
-                                "the paraphrase templates are not being used")
+        if "determinant" in scored:
+            self.assertEqual(
+                1, len(questions),
+                "a benchmark-scored family must use the benchmark's own "
+                f"task statement, but got {questions}")
+        else:
+            self.assertGreaterEqual(len(questions), 3,
+                                    "the paraphrase templates are not being used")
+
+        # a family the benchmark does not score keeps its variety
+        rng = random.Random(5)
+        others = {paraphrase("svd", rng, "3x3") for _ in range(40)}
+        self.assertGreaterEqual(len(others), 3,
+                                "an unscored family should keep varied "
+                                f"wordings, but got {others}")
 
     def test_similarity_transform_preserves_the_spectrum(self):
         import sympy as sp

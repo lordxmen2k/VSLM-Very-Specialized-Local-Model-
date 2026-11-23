@@ -23,7 +23,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 from la.answer import parse_answer
 from la.augment import closing_variants
 from la.benchprompt import (BODY_HINTS, FAMILY_TO_SUBCAT, SYSTEM_PROMPTS)
-from la.benchprompt_tails import PROMPT_TAILS
+from la.benchprompt_tails import PROMPT_TAILS, PROMPT_TAILS_BY_SIZE
 from la.problems import GENERATORS, generate
 
 
@@ -60,6 +60,115 @@ def value_domain(answer: str) -> str:
     return "other"
 
 
+def _check_task_statements(families, n):
+    """The corpus's task statement must be the SCORER's, per size.
+
+    The contract is what the model is actually sent at scoring time,
+    which is NOT the raw problem file: the scorer reconstructs the 4x4
+    task from the subcategory label, so the 4x4 file - a bare matrix
+    with no task statement - is scored with "Find the determinant of the
+    4×4 matrix A." in front of it.
+
+    Comparing the corpus against the raw file therefore flags the
+    CORRECT 4x4 statement as an error. The corpus used to invent its own
+    wordings - 66 to 78 per cent of them naming no size at all - and to
+    write the size with an ASCII "x" where the benchmark writes U+00D7.
+    The scorer is the reference, and it is the reference the model is
+    graded against.
+
+    Run 10 scored 276/660 = 41.8% with the determinant at 1/150 against
+    the base model's 54/150, and this is why.
+    """
+    failures = []
+    print()
+    print(f"{'family':<20} {'scorer task (3x3)':<36} {'corpus'}")
+    for family in families:
+        subcat = FAMILY_TO_SUBCAT[family]
+        want = _scorer_task_statements(subcat)
+        if not want:
+            continue
+        rng = random.Random(20261117)
+        got = {}
+        for _ in range(n):
+            p = generate(family, rng)
+            if p is None:
+                continue
+            parts = [x.strip() for x in p.question.split("\n\n")]
+            body = parts[1] if len(parts) > 1 else ""
+            task = body.split("\n\n")[0].strip() if body else ""
+            got[task] = got.get(task, 0) + 1
+        b3 = want.get("3x3", "")
+        ctxt = " | ".join(sorted(t for t in got if t)[:2]) or "(none)"
+        print(f"{family:<20} {b3[:34]:<36} {ctxt[:44]}")
+        want_all = set()
+        for text in want.values():
+            want_all |= set(text.split(" | "))
+        extra = set(t for t in got if t) - want_all
+        if extra:
+            failures.append(
+                f"{family}: the corpus produces task statements the "
+                f"scorer never sends: {sorted(extra)[:3]}")
+        missing = want_all - set(got)
+        if missing:
+            failures.append(
+                f"{family}: the corpus never produces the scorer's task "
+                f"statement {sorted(missing)[:2]}")
+    return failures
+
+
+def _scorer_task_statements(subcat):
+    """The task statement the SCORER sends, per size.
+
+    Read off the scorer's own prompt, so the 4x4 reconstruction is
+    included exactly as the model receives it.
+    """
+    import csv
+    from la.benchprompt import benchmark_prompt_pair
+    cache = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                         "tests", "_cache")
+    out = {}
+    for size in ("3x3", "4x4", "5x5"):
+        path = os.path.join(cache, f"linalg_bench_{size}.csv")
+        if not os.path.exists(path):
+            continue
+        texts = set()
+        with open(path, newline="", encoding="utf-8") as fh:
+            for row in csv.DictReader(fh):
+                if row["Subcat"] != subcat:
+                    continue
+                _sys, user = benchmark_prompt_pair(
+                    row["problem_latex"], subcat, size)
+                pars = [p for p in user.split("\n\n") if p]
+                if len(pars) > 1 and not pars[1].startswith("A ="):
+                    texts.add(pars[1].strip())
+        if texts:
+            out[size] = " | ".join(sorted(texts))
+    return out
+
+
+def _benchmark_task_statements(subcat):
+    """The task statement the benchmark uses, per size."""
+    import csv
+    cache = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                         "tests", "_cache")
+    out = {}
+    for size in ("3x3", "4x4", "5x5"):
+        path = os.path.join(cache, f"linalg_bench_{size}.csv")
+        if not os.path.exists(path):
+            continue
+        counts = Counter()
+        with open(path, newline="", encoding="utf-8") as fh:
+            for row in csv.DictReader(fh):
+                if row["Subcat"] != subcat:
+                    continue
+                first = row["problem_latex"].split("\n\n")[0].strip()
+                if first.startswith("A ="):
+                    first = ""
+                counts[first] += 1
+        out[size] = counts
+    return out
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--n", type=int, default=200,
@@ -92,9 +201,15 @@ def main(argv=None) -> int:
         # benchmark's own set for its subcategory
         allowed = closing_variants(family)
         # every tail the benchmark uses for this subcategory, rendered the
-        # way the benchmark renders it
+        # way the benchmark renders it: the method and the closing
+        # instruction are ONE paragraph separated by a single newline,
+        # and the table is per SIZE.
         tails = PROMPT_TAILS.get(FAMILY_TO_SUBCAT[family]) or []
-        want_tails = {"\n\n".join(p for p in (m, c) if p) for m, c, _w in tails}
+        want_tails = set()
+        for _size, _entries in PROMPT_TAILS_BY_SIZE.get(
+                FAMILY_TO_SUBCAT[family], {}).items():
+            for m, c, _w in _entries:
+                want_tails.add(f"{m}\n{c}" if m and c else (m or c))
         got_tails = set()
         for _ in range(args.n):
             p = generate(family, rng)
@@ -167,6 +282,10 @@ def main(argv=None) -> int:
     # the SIZE MIX, which is the sixth leg of the contract
     size_failures = _check_size_mix(families, args.n)
     failures.extend(size_failures)
+
+    # the TASK STATEMENT, which is the seventh leg
+    task_failures = _check_task_statements(families, args.n)
+    failures.extend(task_failures)
 
     print()
     if failures:
@@ -259,3 +378,4 @@ def _check_size_mix(families, n):
 
 if __name__ == "__main__":
     sys.exit(main())
+

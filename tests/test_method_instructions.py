@@ -117,7 +117,10 @@ class TestTheCorpusTeachesTheNamedMethod(unittest.TestCase):
         # enough to see one
         for _ in range(400):
             p = generate("determinant", rng)
-            if p is None or "3x3" not in p.question:
+            # the corpus spells the size the way the benchmark does, with
+            # U+00D7, so accept either spelling
+            if p is None or ("3x3" not in p.question
+                             and "3\u00d73" not in p.question):
                 continue
             if "cofactor" in p.scratchpad.lower():
                 saw_cofactor = True

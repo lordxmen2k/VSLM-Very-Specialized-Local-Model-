@@ -207,7 +207,9 @@ class TestDeterminantMethodIsNotTheOnlyOneTaught(unittest.TestCase):
             p = generate("determinant", rng)
             if p is None:
                 continue
-            m = re.search(r"of the (\d)x\1", p.question)
+            # The corpus spells the size the way the benchmark does, with
+            # U+00D7, so accept either spelling.
+            m = re.search(r"of the (\d)[x×]\1", p.question)
             if not m or m.group(1) != "3":
                 continue
             text = p.scratchpad.lower()

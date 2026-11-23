@@ -98,7 +98,14 @@ def _benchmark_matrices(subcat):
     return out
 
 
-def _corpus_matrices(family, n=250):
+def _corpus_matrices(family, n=1500):
+    """The corpus's matrices.
+
+    1500 draws, not 250: the eigenvalue family's large entries are RARE
+    (about one matrix in five is a large-entry one, and the peak is
+    further out still), so a 250-draw window stopped at 1118 against the
+    benchmark's 1120 and the magnitude test failed on a sampling artifact.
+    """
     rng = random.Random(4242)
     out = []
     for _ in range(n):
@@ -240,12 +247,28 @@ class TestTheCorpusArithmeticLoadStaysInsideABand(unittest.TestCase):
     # 41/60 to 15/60 - more than the whole regression. Restoring the
     # products puts matrix_power at 248 operations, over the old band.
     #
+    # RAISED AGAIN TO 340 FOR RUN 11, for the same reason and a sharper
+    # one. The full dot product is now used at EVERY size, including
+    # 5x5, because the measurement that kept the compact form there -
+    # "1,587 tokens against a 1,536 cap" - was taken against a longer
+    # derivation that no longer exists and against a cap that was never
+    # the real one:
+    #
+    #     the real training cap   max_seq_len: 2048  (configs/default.yaml)
+    #     MAX_SEQ_LEN = 1536      a stale constant, enforced nowhere
+    #
+    # Measured in REAL tokens with the model's own tokenizer, the 5x5
+    # derivations are well inside 2048 - see
+    # tests/test_derivation_shows_products.py, which measures them
+    # exactly. So the compact form was never needed, and it was costing
+    # the matrix_power family 26 problems.
+    #
     # The band is a CHANGE DETECTOR, not a difficulty target. A longer
     # derivation that SHOWS ITS WORK is the whole point; the length is
     # bounded by the sequence cap, which is checked separately and
     # exactly (tests/test_prompt_format.py and
     # tests/test_derivation_shows_products.py).
-    MAX_MEAN_OPS = 280
+    MAX_MEAN_OPS = 340
 
     def test_no_family_is_much_longer_than_it_was(self):
         for family in ("determinant", "matrix_vector", "matrix_trace",

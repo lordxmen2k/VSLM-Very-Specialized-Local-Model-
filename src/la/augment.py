@@ -46,7 +46,7 @@ from __future__ import annotations
 import random
 
 from .benchprompt import PREAMBLE, body_hint
-from .benchprompt_tails import PROMPT_TAILS
+from .benchprompt_tails import PROMPT_TAILS, decoration_rng, tails_for
 
 # The corpus family -> benchmark subcategory mapping.
 from .benchprompt import FAMILY_TO_SUBCAT
@@ -71,7 +71,7 @@ def closing_variants(family: str) -> list[str]:
     return [hint] if hint else []
 
 
-def prompt_tail(family: str, rng: random.Random) -> tuple[str, str]:
+def prompt_tail(family: str, rng: random.Random, size: str = "") -> tuple[str, str]:
     """The (method instruction, closing instruction) for one problem.
 
     The benchmark's tails, at the benchmark's own rates. The counts in
@@ -81,9 +81,17 @@ def prompt_tail(family: str, rng: random.Random) -> tuple[str, str]:
     The choice is a function of the per-problem RNG, so it is the same in
     every worker process and for every seed. A counter would give each
     worker its own mix, and the corpus would drift with the worker count.
+
+    The SIZE decides the shape, because the benchmark's 4x4 file is a
+    bare matrix: no method instruction and NO CLOSING INSTRUCTION at
+    all. The corpus used to pick a tail independently of the size, so
+    its 4x4 problems carried a closing instruction the benchmark's do
+    not have - and the model was scored on a prompt it had never seen.
+    The bare entry in PROMPT_TAILS is the ("", "", weight) one, and its
+    weight is the number of 4x4 problems.
     """
     subcat = FAMILY_TO_SUBCAT.get(family)
-    tails = PROMPT_TAILS.get(subcat) if subcat else None
+    tails = tails_for(subcat, size) if subcat else []
     if not tails:
         return "", body_hint(family)
     total = sum(weight for _m, _c, weight in tails)
@@ -236,15 +244,57 @@ TEMPLATES: dict[str, list[str]] = {
 
 
 def paraphrase(family: str, rng: random.Random, size: str = "") -> str:
-    """The task statement for a family, one of several wordings.
+    """The task statement for a family.
 
-    `{size}` is filled in with something like "3x3" where the wording calls
-    for it.
+    For a family the BENCHMARK SCORES, the statement is the benchmark's
+    own, verbatim, chosen by size - see benchprompt_tasks.py for why the
+    size decides it and for what the corpus used to do instead.
+
+    For a family the benchmark does not score, the wording is chosen from
+    this module's own templates, so those families keep some variety.
+
+    The choice is a function of the per-problem RNG, so it is the same in
+    every worker process and for every seed. A counter would give each
+    worker its own mix, and the corpus would drift with the worker count.
+
+    LIKE THE TAIL, THE TASK STATEMENT IS DRAWN FROM A SEPARATE STREAM.
+    It is prompt decoration; the matrix is the problem. Sharing the
+    generator's stream meant that every change to the prompt contract
+    consumed a different number of draws and silently rewrote every
+    matrix after it - which is how run 11's task-statement change moved
+    the corpus's largest eigenvalue entry from 1120 to 1118 and looked
+    like a magnitude regression.
     """
-    options = TEMPLATES.get(family)
-    if not options:
+    rng = decoration_rng(rng)
+    from .benchprompt import FAMILY_TO_SUBCAT
+    from .benchprompt_tasks import task_statements
+
+    subcat = FAMILY_TO_SUBCAT.get(family)
+    if subcat:
+        options = task_statements(subcat, size)
+        if options:
+            # The 4x4 shape in the benchmark's files is a BARE MATRIX, but
+            # the SCORER reconstructs the task from the subcategory label
+            # and sends that - so the corpus must teach the reconstructed
+            # statement, not an empty one. benchprompt.task_for() is the
+            # function that does the reconstruction, and both sides call
+            # it, so they cannot drift apart.
+            if size.startswith("4x4"):
+                from .benchprompt import task_for
+                return task_for(subcat, size)
+            total = sum(weight for _text, weight in options)
+            pick = rng.randrange(total)
+            upto = 0
+            for text, weight in options:
+                upto += weight
+                if pick < upto:
+                    return text
+            return options[-1][0]
+
+    templates = TEMPLATES.get(family)
+    if not templates:
         return ""
-    text = rng.choice(options)
+    text = rng.choice(templates)
     if "{size}" in text:
         text = text.replace("{size}", size or "")
     return text
@@ -273,11 +323,32 @@ def question(family: str, tail: tuple[str, str], task: str, body: str) -> str:
     scored on a prompt the corpus never produced.
     """
     method, closing = tail
-    parts = [PREAMBLE, task, body]
-    if method:
-        parts.append(method)
-    if closing:
-        parts.append(closing)
+    # An EMPTY task is the benchmark's bare-matrix shape: all 220 of
+    # LinAlg-Bench's 4x4 problems are a matrix with no task statement and
+    # no closing instruction. The task paragraph is omitted rather than
+    # left as a blank line, so the prompt has the benchmark's shape.
+    parts = [PREAMBLE]
+    if task:
+        parts.append(task)
+    parts.append(body)
+    # The method instruction and the closing instruction are ONE
+    # paragraph in the benchmark, separated by a single newline:
+    #
+    #     Use row reduction to find the number of non-zero rows in row
+    #     echelon form.
+    #     Show your row operations.
+    #
+    # The corpus used to put them in two paragraphs, separated by a blank
+    # line, so a prompt with a method instruction had five paragraphs
+    # where the benchmark's has four. The model was trained on the
+    # corpus's shape and scored on the benchmark's.
+    if method and closing:
+        parts.append(f"{method}\n{closing}")
+    else:
+        if method:
+            parts.append(method)
+        if closing:
+            parts.append(closing)
     return "\n\n".join(parts) + "\n\n"
 
 

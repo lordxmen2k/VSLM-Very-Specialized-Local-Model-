@@ -70,6 +70,27 @@ def _dot_product_lines(scratchpad):
     return out
 
 
+def _tokeniser():
+    """The model's own tokenizer, if it has been fetched.
+
+    `make tokenizer` puts it in .cache/. It is not committed - 11 MB of
+    vocabulary is not worth a repository - so the test skips without it.
+    """
+    repo = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+    sys.path.insert(0, os.path.join(repo, "scripts"))
+    try:
+        from qwen_bpe import QwenBPE
+    except Exception:
+        return None
+    if not os.path.exists(os.path.join(repo, ".cache",
+                                       "qwen3_tokenizer.json")):
+        return None
+    try:
+        return QwenBPE()
+    except Exception:
+        return None
+
+
 class TestTheDerivationShowsTheMultiplications(unittest.TestCase):
     """The products must be visible wherever there is room for them."""
 
@@ -112,29 +133,60 @@ class TestTheDerivationShowsTheMultiplications(unittest.TestCase):
         if not seen:
             self.skipTest(f"no {size}x{size} {family} problem was generated")
 
-    def test_the_5x5_form_still_fits_the_sequence_cap(self):
-        """The 5x5 example DOES need a reduced form - the full one runs
-        to 1,601 tokens against a 1,536 cap, and a truncated example
-        loses the end of its completion, which is where the plot spec
-        is. So 5x5 is allowed to drop the products, and everything else
-        is not.
+    def test_the_5x5_form_fits_the_real_training_cap(self):
+        """The 5x5 form DOES fit, and it is measured in REAL tokens.
 
-        This test exists so the 5x5 exception stays an EXCEPTION: if a
-        future change makes the 5x5 form fit, this test will say so and
-        the products can go back.
+        The exception existed because "the full form runs to 1,601 tokens
+        against a 1,536 cap". Both numbers were wrong:
+
+            1,601  measured against a LONGER derivation that no longer
+                   exists - the derivation has since been shortened
+            1,536  MAX_SEQ_LEN, a stale constant that is enforced
+                   NOWHERE. The real cap is max_seq_len: 2048 in
+                   configs/default.yaml, and the trainer truncates at
+                   that.
+
+        So the exception was never needed, and it was costing the
+        matrix_power family 26 problems: 41/60 became 15/60.
+
+        The measurement is now in REAL tokens, from the model's own
+        tokenizer, against the real cap. A character count divided by a
+        heuristic is what made the exception look necessary.
         """
-        from la.benchprompt import MAX_SEQ_LEN as cap
-        rng = random.Random(4242)
+        import yaml
+
+        from la.benchprompt import row_prompt
+
+        repo = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+        with open(os.path.join(repo, "configs", "default.yaml"),
+                  encoding="utf-8") as fh:
+            cfg = yaml.safe_load(fh)
+        cap = int(cfg["training"]["max_seq_len"])
+
+        tokeniser = _tokeniser()
+        if tokeniser is None:
+            self.skipTest("the model's tokenizer is not available")
+
         worst = 0
-        for _ in range(300):
-            p = generate("matrix_power", rng)
-            if p is None:
-                continue
-            worst = max(worst, len(p.question) + len(p.completion()))
+        for family in ("matrix_power", "matrix_multiply"):
+            rng = random.Random(4242)
+            for _ in range(200):
+                p = generate(family, rng)
+                if p is None:
+                    continue
+                m = re.search(r"\\begin\{[bp]matrix\}(.*?)\\end\{[bp]matrix\}",
+                              p.question, re.S)
+                if not m:
+                    continue
+                rows = [ln for ln in m.group(1).split("\\\\") if ln.strip()]
+                if len(rows) != 5:
+                    continue
+                n = tokeniser.count(p.prompt()) + tokeniser.count(p.completion())
+                worst = max(worst, n)
         self.assertLessEqual(
-            worst / 2.04, cap,
-            f"the longest matrix_power example is about {worst / 2.04:.0f} "
-            f"tokens, over the {cap} cap")
+            worst, cap,
+            f"the longest 5x5 example is {worst} real tokens, over the "
+            f"{cap} cap, so the products have to be dropped at that size")
 
 
 class TestTheArithmeticCheckerWouldNotHaveCaughtIt(unittest.TestCase):

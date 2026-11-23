@@ -1973,3 +1973,193 @@ tokens against a 1,536 cap.
 **Corollary:** when a change is made to fit a limit, measure the limit at
 EVERY size the change touches, not at the size that failed. Run 9
 measured 5×5, applied the fix to 4×4 as well, and lost 26 problems.
+
+---
+
+## Run 11 — the families that suck, and why (2026-11-23)
+
+**The request.** "Only trace and transpose work relatively well all other
+tasks suck. Fix them." Run 10 measured `276/660 = 41.8%` against the base
+model's `306/660 = 46.4%`, and the per-family table said exactly this:
+
+| family | run 10 | base | gap |
+|---|---|---|---|
+| determinant | **1** / 150 | 54 / 150 | **−53** |
+| eigenvalue | **1** / 30 | 2 / 30 | −1 |
+| nullity | 14 / 60 | 19 / 60 | −5 |
+| rank | 27 / 60 | 21 / 60 | +6 |
+| multiplication | 35 / 60 | 25 / 60 | +10 |
+| matrix_power | 38 / 60 | 34 / 60 | +4 |
+| matrix_vector | 43 / 60 | 44 / 60 | −1 |
+| trace | 58 / 60 | 58 / 60 | 0 |
+| transpose | 59 / 60 | 49 / 60 | +10 |
+
+Without the determinant the fine-tune was **275/510 = 53.9%** against the
+base model's **252/510 = 49.4%** — so the determinant was the entire
+remaining deficit, and it was a deficit of 53 problems in one family.
+
+Run 11 fixes nine separate causes. Every one of them was found by
+measuring, not by guessing.
+
+### 1. The task statement is part of the contract, per (family, size)
+
+The corpus invented its own task statements: 66–78% of them named no size
+at all, and the ones that did wrote the size with an ASCII "x" where the
+benchmark writes U+00D7. The benchmark's statement is deterministic per
+(family, size), and the corpus must use the benchmark's own words.
+
+`src/la/benchprompt_tasks.py` holds them, extracted byte-exactly from the
+released files, and `scripts/extract_prompt_parts.py --check` verifies them
+against those files in both directions — it is wired into
+`make contract-check`.
+
+**The 4×4 shape is the scorer's, not the file's.** The 4×4 problem file is
+a bare matrix with no task statement, but the scorer reconstructs the task
+from the subcategory label and sends *"Find the determinant of the 4×4
+matrix A."* So the corpus must teach the reconstructed statement. Both
+sides call `benchprompt.task_for()`, so they cannot drift apart.
+
+### 2. The prompt tail is size-specific, and the method and the closing
+### instruction are ONE paragraph
+
+The corpus's tail table mixed the sizes: the transpose's 3×3 tail could
+turn up in a 5×5 problem. And the method instruction and the closing
+instruction were in two paragraphs, where the benchmark has them in one,
+separated by a single newline — so a prompt with a method instruction had
+five paragraphs where the benchmark's has four.
+
+`src/la/benchprompt_tails.py` now carries the tails per size, with the
+line breaks the files actually have.
+
+### 3. The prompt decoration must not be able to move the matrix
+
+The task statement and the tail were drawn from the SAME random stream as
+the matrix they decorate. Every change to the prompt contract consumed a
+different number of draws and silently rewrote every matrix after it —
+the run 8 defect, in a form that does not change the corpus's shape and
+so cannot be seen in the output.
+
+Run 10's corpus was itself a reshuffle because of this. The fix is
+`benchprompt_tails.decoration_rng`: the decoration takes exactly ONE draw
+from the problem's stream — its seed — and its own stream after that, so
+the count cannot depend on the contract. `tests/test_decoration_stream.py`
+pins it, and it fails on run 10's code.
+
+### 4. The determinant's cofactor minors were ASSERTED, not computed
+
+    the first minor is \begin{bmatrix} 4 & -1 \\ 5 & 1 \end{bmatrix} = 9
+
+The model was shown the minor's value and never the arithmetic that
+produced it — taught to emit a number it could not compute. This is run
+9's lesson in a different family, and the determinant is the family that
+lost 53 problems.
+
+The minor is now computed: `= 4*1 - (-1)*5 = 4 - -5 = 9`.
+
+### 5. The determinant's elimination used FRACTIONS
+
+Every 4×4 and 5×5 determinant ran through `\frac{-281}{32}` and
+`\frac{-688}{281}`. The benchmark uses **no fractions at all** — 0 of its
+660 problems and 0 of its 660 answers contain one, and all 150 of its
+determinant answers are integers.
+
+The elimination is now the fraction-free (Bareiss) form, whose divisions
+are exact, and the determinant is the last diagonal entry of the Bareiss
+form. The verification step is an independent cofactor expansion, so it
+is a different computation rather than a repeat of the answer.
+
+### 6. The eigenvalue's characteristic polynomial was PYTHON, not LaTeX
+
+    the characteristic polynomial is p(λ) = lambda**3 + 7*lambda**2 - ...
+
+`lambda**3` is Python's syntax. It rendered as italic "lambda**3" and it
+was the FIRST line of every eigenvalue derivation in the corpus. The
+characteristic polynomial is now `\lambda^{3} + 7 \lambda^{2} - 38 \lambda
+- 240`, and the roots are FOUND rather than asserted: the factoring is
+shown, and the polynomial factors were verified against sympy on 60
+samples.
+
+### 7. The rank and nullity corpora could not produce a full-rank matrix
+
+The rank was drawn from 1 to n−1, so a full-rank matrix was **impossible**.
+The benchmark's matrices span the whole range and the full-rank case is
+the common one:
+
+    benchmark rank (size, rank)     corpus rank (size, rank), before
+      3x3  1: 2  2: 8  3: 10         3x3  1: 51  2: 43
+      4x4  2: 4  3: 7  4: 9          4x4  1: 36  2: 32  3: 34
+      5x5  2: 3  3: 4  4: 6  5: 7    5x5  1: 26  2: 26  3: 24  4: 28
+
+The corpus's distribution was the benchmark's shifted one rank down, and
+the benchmark's single most common 3×3 rank answer is 3 — which the
+corpus could not produce. The rank and nullity families were the two
+that LOST to the base model, and they are the two whose corpus was
+missing a whole rank.
+
+`src/la/benchprompt_ranks.py` carries the benchmark's own weights per
+size, so the corpus's mix of RANKS matches the mix of rank ANSWERS.
+
+### 8. The rank reduction scaled the pivot rows, and stated its operations
+### without their results
+
+`R1 <- R1 / (-14)` divided a whole row and manufactured fractions, and the
+echelon form's entries then appeared from nowhere. The reduction no longer
+scales — the rank is the number of non-zero rows in the echelon form,
+which is what the benchmark asks for — and each operation is followed by
+the row it produced.
+
+### 9. The 5×5 dot products dropped their PRODUCTS — and the cap that
+### justified it was never real
+
+Run 9 taught the 5×5 dot products in a compact form that dropped the
+products:
+
+    full:     4*4 + (-4)*(-4) + 3*3 + 0*0 = 16 + 16 + 9 + 0 = 41
+    compact:                        16 + 16 + 9 + 0 = 41
+
+because "the full form runs to 1,601 tokens against a 1,536 cap". **Both
+numbers were wrong.** The 1,601 was measured against a longer derivation
+that no longer exists, and the 1,536 was `MAX_SEQ_LEN`, a stale constant
+enforced NOWHERE — the real cap is `max_seq_len: 2048` in
+`configs/default.yaml`, and the trainer truncates at that.
+
+So the 5×5 examples were measured in REAL tokens for the first time, with
+the model's own tokenizer (`scripts/qwen_bpe.py`, a faithful BPE over the
+model's `tokenizer.json`):
+
+| | full form | real tokens | vs 2048 |
+|---|---|---|---|
+| matrix_power 5×5 | per entry | 1,892 | fits |
+| matrix_multiply 5×5 | per entry | 2,042 | fits |
+
+with **zero** of 800 sampled examples over the cap. Getting there took
+four changes, each measured:
+
+- the 5×5 entries are grouped by row, so the label is paid five times
+  instead of twenty-five;
+- the per-entry label is `(1,1) =` rather than `(AB)_{11} =`;
+- the products carry no parentheses: `3*-2` is unambiguous and is three
+  tokens shorter per entry;
+- the plot spec stores whole numbers as whole numbers — `6` not `6.0` —
+  which is 157 tokens down to 107 for a 5×5.
+
+**A cap measured in characters divided by a heuristic is not a cap.** The
+5×5 exception cost the matrix_power family 26 problems, and it was never
+needed.
+
+### What run 11 does NOT change
+
+`enable_thinking=False`, the EOS supervision, the shared `row_prompt()`
+rendering, the grader and the released benchmark files are all untouched.
+`configs/default.yaml` is still the single source of truth for the base
+model and the corpus weights.
+
+### The verification
+
+| | |
+|---|---|
+| unit suite | 238 tests |
+| `make contract-check` | CONTRACT OK, and the prompt tables match the released files |
+| `make check-arithmetic` | 3,800 problems, every printed expression evaluates to the value it claims |
+| the corpus's length | measured in REAL tokens against the real 2,048 cap |
+

@@ -118,9 +118,19 @@ test:
 check-arithmetic:
 	$(PYTHON) -m la.check_arithmetic --n 200
 
+# fetch the model's own tokenizer, for measuring the corpus's length in
+# REAL tokens. It is not committed - 11 MB of vocabulary is not worth a
+# repository - and the length tests skip without it.
+tokenizer:
+	mkdir -p .cache
+	curl -sL --retry 3 -o .cache/qwen3_tokenizer.json \
+		https://huggingface.co/Qwen/Qwen3-1.7B/resolve/main/tokenizer.json
+	@ls -la .cache/qwen3_tokenizer.json
+
 # print the corpus's answer contract, family by family, and fail on a
 # mismatch with the benchmark's own prompts or answer shapes
 contract-check:
+	$(PYTHON) scripts/extract_prompt_parts.py --check
 	$(PYTHON) scripts/check_corpus_contract.py --n 200
 
 # say what the model actually wrote for the questions it got wrong

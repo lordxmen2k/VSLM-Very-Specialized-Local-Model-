@@ -96,18 +96,21 @@ class TestBenchmarkPromptFormat(unittest.TestCase):
         bare = "A = \\begin{bmatrix} 1 & 2 \\end{bmatrix}"
         out = build_benchmark_prompt(bare, "determinant", "4x4")
         self.assertIn(PREAMBLE, out)
-        self.assertIn("Find the determinant of the 4x4 matrix A.", out)
+        # the benchmark spells the size with U+00D7, and so does the
+        # corpus: an ASCII "4x4" is a DIFFERENT string to the grader
+        self.assertIn("Find the determinant of the 4\u00d74 matrix A.", out)
         self.assertNotIn("4x4x4", out)
         self.assertTrue(has_task(bare) is False)
 
     def test_a_problem_with_its_own_task_is_left_alone(self):
-        p3 = ("Find the determinant of the 3x3 matrix A.\n\n"
+        # the benchmark's own spelling, with U+00D7
+        p3 = ("Find the determinant of the 3\u00d73 matrix A.\n\n"
               "A = \\begin{bmatrix} 1 & 2 \\\\ 3 & 4 \\end{bmatrix}\n\n"
               "Show all intermediate steps. Put your final numerical answer "
               "inside \\boxed{}.")
         out = build_benchmark_prompt(p3, "determinant", "3x3")
         self.assertIn(PREAMBLE, out)
-        self.assertEqual(1, out.count("Find the determinant of the 3x3"))
+        self.assertEqual(1, out.count("Find the determinant of the 3\u00d73"))
         self.assertTrue(has_task(p3))
 
     def test_no_corpus_example_is_truncated(self):
@@ -167,11 +170,17 @@ class TestBenchmarkPromptFormat(unittest.TestCase):
                       "for it that way")
 
     def test_the_task_is_spelled_once(self):
+        """The size is spelled with U+00D7, the way the benchmark spells it.
+
+        The corpus used to write an ASCII "3x3" where the benchmark writes
+        "3\u00d73", which is a different string to a grader that matches on
+        the task text.
+        """
         for size in ("3", "4", "5", "3x3", "4x4"):
             t = task_for("determinant", size)
-            self.assertIn("4x4" if size.startswith("4") else
-                          f"{size[0]}x{size[0]}", t, size)
-            self.assertNotIn("x4x4", t, size)
+            n = size[0]
+            self.assertIn(f"{n}\u00d7{n}", t, size)
+            self.assertNotIn(f"{n}x{n}", t, size)
 
 
 if __name__ == "__main__":
