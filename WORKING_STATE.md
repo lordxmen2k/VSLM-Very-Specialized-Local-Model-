@@ -2163,3 +2163,111 @@ model and the corpus weights.
 | `make check-arithmetic` | 3,800 problems, every printed expression evaluates to the value it claims |
 | the corpus's length | measured in REAL tokens against the real 2,048 cap |
 
+
+---
+
+## Run 12 — the trainer's cap was 1,536 and the config said 2,048 (2026-11-23)
+
+### What the log showed
+
+The right commit ran (`491ac2a`), the contract check passed, the prompt
+tables matched the released files, the corpus built at 957 problems a
+second and the arithmetic was clean on 3,800 problems. Then:
+
+```
+  step      1/1,250  loss 1.6386  lr 2.70e-06  10.12 s/step  ...
+                                                     eta 210.6 min  vram 5.8/8.5 GB
+RuntimeError: CUDA error: CUBLAS_STATUS_EXECUTION_FAILED when calling
+`cublasSgemm( handle, opa, opb, m, n, k, &alpha, a, lda, b, ldb, &beta, c, ldc)`
+```
+
+and then two more errors that were both consequences of the crash.
+
+### THE CAP WAS NEVER THE CONFIG'S CAP
+
+The banner printed `max seq len 1536`. The config says `max_seq_len:
+2048`. The Makefile read `configs/default.yaml` for the base model and
+nothing else; `la.train` never opened the file and carried its own
+`default=1536`. **The config was inert.**
+
+Measured with the model's own tokenizer over 1,500 sampled examples, the
+full training text (prompt + completion):
+
+| cap | truncated |
+|---|---|
+| 1,536 | 222 / 1,500 = **14.8%** |
+| 2,048 | 45 / 1,500 = 3.0% |
+| **2,304** | **0 / 1,500 = 0%** |
+
+The longest example is **2,132 tokens** — a 5×5 matrix product with its
+products shown — and the cap is now **2,304**, read from the config.
+
+The truncation lands at the END of the completion, which is where the
+answer and the plot spec are. So 14.8% of the corpus was being taught
+without its answer, in exactly the families run 11 had just fixed.
+
+Memory check: the logits cost about 1.5 MB per token over a vocabulary of
+151,936, so a 2,304 cap needs about **7.2 GB** of live tensors against the
+card's 12.88 GB. It fits.
+
+**A value in a configuration file is not a value the code uses unless the
+code reads it.** The trainer now reads it, and `tests/
+test_config_is_the_source_of_truth.py` fails if the two ever disagree.
+
+### THE TOKENIZER CAME FROM THE ADAPTER
+
+`load_model` did `AutoTokenizer.from_pretrained(adapter or base)`. The
+trainer creates the output directory BEFORE the training loop and writes
+the adapter into it at the VERY END, so the crash left an **empty
+directory** behind, and every later command died with:
+
+```
+ValueError: Couldn't instantiate the backend tokenizer from one of:
+(1) a `tokenizers` library serialization file,
+(2) a slow tokenizer instance to convert or
+(3) an equivalent slow tokenizer class to instantiate and convert.
+```
+
+which reads like a missing dependency rather than a missing training run.
+The tokenizer is the base model's; the adapter holds weights. It now
+comes from the base, always.
+
+### AND THE EMPTY DIRECTORY WOULD HAVE SCOREDED AS THE BASE MODEL
+
+The benchmark's adapter guard skipped anything with no
+`adapter_config.json` — which is exactly the empty shell — and fell
+through to the base model. It would have produced a full 660-problem
+score and reported it as the fine-tune's. **The number would have been
+indistinguishable from a real one.**
+
+There is now a guard that refuses an adapter directory with no adapter in
+it, and the trainer writes `.incomplete` into the output directory before
+the loop and removes it when the run succeeds.
+
+### THE GPU FAULT IS NOT A BUG IN THE LOOP
+
+`CUBLAS_STATUS_EXECUTION_FAILED` has two documented causes — the card is
+out of memory, or the Windows TDR watchdog gave up on a long kernel — and
+neither is in the training code. **The same code trained the whole of run
+10 on the same card, at the same cap, with the same allocator.** Run 11's
+banner and run 10's differ only in the corpus's length.
+
+So the fault is retried, with `torch.cuda.empty_cache()` between
+attempts, and a batch whose retries are exhausted is skipped rather than
+fatal: a batch of 20,000 is worth more than one batch of 16.
+
+### What run 12 changes
+
+| | |
+|---|---|
+| the cap | 2,304, read from `configs/default.yaml` by `la.train` |
+| the trainer's other defaults | read from the config too: lr, batch size, grad accum, warmup ratio, base |
+| the tokenizer | loaded from the base, never from the adapter |
+| an empty adapter directory | refused by the benchmark, with a message that says what to do |
+| an unfinished run | marked with `.incomplete`, unmarked on success |
+| a GPU fault | retried with the cache emptied; the batch is skipped if it does not clear |
+
+`enable_thinking=False`, the EOS supervision, the shared `row_prompt()`
+rendering, the grader and the released benchmark files are all untouched.
+The corpus itself is **unchanged** — run 12 is about the trainer and the
+benchmark harness, not about the mathematics.

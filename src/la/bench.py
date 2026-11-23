@@ -294,8 +294,42 @@ def _same_checkpoint(a: str, b: str) -> bool:
     return tail(a) == tail(b)
 
 
+def _adapter_has_weights(adapter: str) -> bool:
+    """Whether an adapter directory holds an adapter that can be applied.
+
+    The trainer writes `adapter_config.json` and the weight tensors. A
+    directory with neither is the empty shell the trainer leaves behind
+    when a run crashes, and it is not an adapter.
+
+    The `.incomplete` marker is the trainer's own record that a run
+    started and did not finish; it is removed when the run succeeds.
+    """
+    if os.path.exists(os.path.join(adapter, ".incomplete")):
+        return False
+    if os.path.exists(os.path.join(adapter, "adapter_config.json")):
+        return True
+    try:
+        names = os.listdir(adapter)
+    except OSError:
+        return False
+    for name in names:
+        if name.endswith(".safetensors") or name.endswith(".bin"):
+            return True
+    return False
+
+
 def _check_adapter_base(base: str, adapter: str) -> None:
-    """Stop if the adapter was trained on a different base model.
+    """Stop if the adapter is empty, or was trained on a different base.
+
+    Two failure modes, and both of them used to pass silently.
+
+    An EMPTY adapter directory. The trainer creates the output directory
+    before the training loop and writes the adapter into it at the very
+    end, so a run that crashed leaves an empty directory behind. Scoring
+    that directory fell through to the BASE model, which produces a
+    number that looks like a fine-tune's score and is not one at all.
+
+    An adapter trained on a DIFFERENT base model.
 
     A LoRA adapter is a difference between two models. Applied to the
     wrong weights it produces a model that is neither one, and the result
@@ -308,6 +342,24 @@ def _check_adapter_base(base: str, adapter: str) -> None:
     """
     if not adapter or not os.path.isdir(adapter):
         return
+
+    if not _adapter_has_weights(adapter):
+        raise SystemExit(
+            f"\nREFUSING TO RUN: the adapter directory holds no adapter.\n"
+            f"\n"
+            f"  {adapter}\n"
+            f"\n"
+            f"The trainer creates the output directory before the training\n"
+            f"loop and writes the adapter into it at the end, so an empty\n"
+            f"directory is a training run that did not finish. Scoring it\n"
+            f"would score the BASE model and report the number as the\n"
+            f"fine-tune's.\n"
+            f"\n"
+            f"Train it first:\n"
+            f"  make train ADAPTER={adapter}\n"
+            f"\n"
+            f"or remove the directory if the run was abandoned.\n"
+        )
 
     trained_on = None
     source = None

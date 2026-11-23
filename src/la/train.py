@@ -7,10 +7,16 @@ survive the churn in the training-library APIs without changing.
     python -m la.train --data data/train.jsonl --out runs/vslm
 
 The default settings are chosen for a 12 GB card: 4-bit NF4 weights, rank-32
-LoRA, gradient checkpointing, a sequence length of 2048 and 16 steps of
+LoRA, gradient checkpointing, a sequence length of 2304 and 16 steps of
 gradient accumulation. A 1.7B model at that length fits in about 8 GB of
 activations and optimiser state, so the card has room for a 4K context if you
 raise --max-seq-len.
+
+The defaults come from configs/default.yaml, so that file is the single
+source of truth for them. It was not, once: the sequence cap was
+hard-coded here at 1536 while the config said 2048, which made the
+config inert and truncated 14.8 per cent of the corpus - the end of a
+completion, where the answer and the plot spec are.
 """
 from __future__ import annotations
 
@@ -35,6 +41,37 @@ from .speed import (SPEED_CONFIGS, SPEED_ROW_PREFIX, format_oom, format_row,
                      parse_speed_row)
 
 IGNORE = -100
+
+# The configuration lives in configs/default.yaml and it is the single
+# source of truth. It was not: the trainer carried its own copy of the
+# sequence cap, hard-coded at 1536, while the config said 2048. The corpus
+# was measured against 2048 and written to fit 2048, and the trainer
+# truncated it at 1536 instead - 15.5 per cent of it, losing the end of
+# the completion, which is where the answer and the plot spec are.
+#
+# One home for the values, read by the code that uses them.
+CONFIG_PATH = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+    "configs", "default.yaml")
+
+
+def load_config(path: str | None = None) -> dict:
+    """Read configs/default.yaml, or an empty dict if it is not there.
+
+    A missing config must not stop the trainer: the command line still
+    has its own defaults, and a run that overrides everything on the
+    command line does not need the file. But the defaults below come
+    FROM the config, so a missing file means the defaults are the ones
+    written into this function.
+    """
+    try:
+        import yaml
+        with open(path or CONFIG_PATH, encoding="utf-8") as fh:
+            return yaml.safe_load(fh) or {}
+    except Exception as exc:
+        print(f"  could not read the config ({exc}); using the built-in "
+              f"defaults", file=sys.stderr)
+        return {}
 
 
 def read_jsonl(path: str) -> list[dict]:
@@ -236,6 +273,58 @@ def save_generation_config(model, tok, out_dir: str) -> None:
         print(f"  could not write the generation config: {exc}")
 
 
+def is_gpu_fault(exc: BaseException) -> bool:
+    """Whether an exception is a GPU fault rather than a bug in the code.
+
+    The cuBLAS failure is the one that matters:
+
+        RuntimeError: CUDA error: CUBLAS_STATUS_EXECUTION_FAILED when
+        calling `cublasSgemm(...)`
+
+    It arrives in the backward pass, it has two documented causes (the
+    card is out of memory, or the Windows TDR watchdog gave up on a long
+    kernel), and it is not a bug in the training loop - the same code
+    trains fine on the same card. Run 11 died on it at the first
+    optimiser step, after the corpus had been generated and the contract
+    checks had passed.
+
+    A run is three and a half hours. It should not die on a fault that a
+    retry can clear.
+    """
+    text = str(exc).lower()
+    return ("cublas" in text
+            or "cuda error" in text
+            or "cudnn" in text
+            or "out of memory" in text
+            or isinstance(exc, getattr(torch, "OutOfMemoryError", ())))
+
+
+def recover_gpu(exc: BaseException, attempt: int) -> bool:
+    """Clear whatever the GPU is holding and report whether to retry.
+
+    A cuBLAS failure leaves the allocator holding the memory the failed
+    kernel was using, so the retry needs a clean slate: an empty cache
+    and the garbage collector's pass over the failed graph.
+    """
+    print(f"  GPU fault ({type(exc).__name__}); clearing the cache and "
+          f"retrying (attempt {attempt})", flush=True)
+    try:
+        torch.cuda.empty_cache()
+    except Exception:
+        pass
+    try:
+        import gc
+        gc.collect()
+    except Exception:
+        pass
+    try:
+        torch.cuda.synchronize()
+    except Exception:
+        # the context is broken; the retry will tell us whether it is
+        pass
+    return True
+
+
 def cosine_lr(step: int, total: int, warmup: int, peak: float) -> float:
     if step < warmup:
         return peak * (step + 1) / max(1, warmup)
@@ -418,25 +507,33 @@ def speed_test(args, rows, tok, pad_id) -> int:
 
 
 def main(argv=None) -> int:
+    # Every default comes from configs/default.yaml, so the file is the
+    # single source of truth and a value in it is a value the trainer uses.
+    cfg = load_config()
+    training = cfg.get("training", {}) if isinstance(cfg, dict) else {}
+    model_cfg = cfg.get("model", {}) if isinstance(cfg, dict) else {}
+
     ap = argparse.ArgumentParser(description="QLoRA fine-tune Qwen3-1.7B")
-    ap.add_argument("--base", default="Qwen/Qwen3-1.7B")
+    ap.add_argument("--base", default=model_cfg.get("base", "Qwen/Qwen3-1.7B"))
     ap.add_argument("--data", default="data/train.jsonl")
     ap.add_argument("--out", default="runs/vslm")
     ap.add_argument("--epochs", type=float, default=1.0,
                     help="passes over the corpus. 1 is the default because the "
                          "corpus is large enough to fill it; 2 is often a "
                          "little better and costs twice as long")
-    ap.add_argument("--lr", type=float, default=1e-4)
+    ap.add_argument("--lr", type=float, default=training.get("lr", 1e-4))
     ap.add_argument("--rank", type=int, default=32)
     ap.add_argument("--alpha", type=int, default=64)
-    ap.add_argument("--max-seq-len", type=int, default=1536,
+    ap.add_argument("--max-seq-len", type=int,
+                    default=training.get("max_seq_len", 2048),
                     help="the derivations show their arithmetic, so the long "
-                         "tail runs past a thousand tokens. At 1024, 3.9 per "
-                         "cent of the corpus was being cut short, and the "
-                         "model learned to stop before the plot block. 1536 "
-                         "clears it; make speed-test reports how many "
-                         "examples the cap is still cutting")
-    ap.add_argument("--batch-size", type=int, default=1,
+                         "tail runs past a thousand tokens, and the 5x5 "
+                         "matrix products run past two thousand. The cap "
+                         "comes from configs/default.yaml, which is the "
+                         "single source of truth; make speed-test reports "
+                         "how many examples the cap is still cutting")
+    ap.add_argument("--batch-size", type=int,
+                    default=training.get("batch_size", 1),
                     help="examples per forward pass. 1 with grad-accum 16 "
                          "keeps the effective batch at 16, and is the only "
                          "shape that fits: at 768 tokens the logits and "
@@ -446,10 +543,12 @@ def main(argv=None) -> int:
     ap.add_argument("--num-workers", type=int, default=0,
                     help="dataloader workers. The corpus is tokenised up "
                          "front, so 0 is usually enough")
-    ap.add_argument("--grad-accum", type=int, default=16,
+    ap.add_argument("--grad-accum", type=int,
+                    default=training.get("grad_accum", 16),
                     help="gradient accumulation. batch-size x grad-accum is "
                          "the effective batch, which is 16 either way")
-    ap.add_argument("--warmup-ratio", type=float, default=0.03)
+    ap.add_argument("--warmup-ratio", type=float,
+                    default=training.get("warmup_ratio", 0.03))
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--max-steps", type=int, default=0,
                     help="stop after this many optimiser steps (smoke test)")
@@ -462,6 +561,12 @@ def main(argv=None) -> int:
     ap.add_argument("--no-4bit", action="store_true",
                     help="deprecated alias for --precision bf16")
     ap.add_argument("--log-every", type=int, default=20)
+    ap.add_argument("--gpu-retries", type=int, default=3,
+                    help="how many times to retry a batch after a GPU "
+                         "fault. A cuBLAS failure is a fault in the GPU, "
+                         "not in the model, and it is often clearable by "
+                         "emptying the cache; the run is three and a half "
+                         "hours and should not die on it")
     ap.add_argument("--speed-test", action="store_true",
                     help="run the same data through five batch shapes and "
                          "report the cost of each, then exit")
@@ -578,6 +683,16 @@ def main(argv=None) -> int:
         return 0
 
     os.makedirs(args.out, exist_ok=True)
+    # A run that dies leaves the directory behind, and an empty directory
+    # looks like an adapter to anything that checks only for the
+    # directory. It is not one: the adapter is written at the very end.
+    # Mark it, and remove the mark on success.
+    _marker = os.path.join(args.out, ".incomplete")
+    try:
+        with open(_marker, "w", encoding="utf-8") as fh:
+            fh.write(f"training started at {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+    except OSError:
+        _marker = None
     model.train()
     step = 0
     micro = 0
@@ -605,9 +720,33 @@ def main(argv=None) -> int:
             data_s += time.time() - t_fetch
             batch = {k: v.to(model.device) for k, v in batch.items()}
             win_tok += int(batch["attention_mask"].sum().item())
-            out = model(**batch)
-            loss = out.loss / args.grad_accum
-            loss.backward()
+            # A GPU fault is retried, not fatal. The run is three and a
+            # half hours; the fault is a fault in the GPU, not in the
+            # model, and it is often clearable by emptying the cache.
+            attempt = 0
+            ok = False
+            while True:
+                try:
+                    out = model(**batch)
+                    loss = out.loss / args.grad_accum
+                    loss.backward()
+                    ok = True
+                    break
+                except Exception as exc:
+                    if not is_gpu_fault(exc):
+                        raise
+                    attempt += 1
+                    if attempt > args.gpu_retries:
+                        print(f"  the GPU fault did not clear after "
+                              f"{args.gpu_retries} retries; skipping this "
+                              f"batch and carrying on", flush=True)
+                        # the graph is gone; the next batch starts clean
+                        optim.zero_grad(set_to_none=True)
+                        break
+                    recover_gpu(exc, attempt)
+                    win_tok -= int(batch["attention_mask"].sum().item())
+            if not ok:
+                continue
             run_loss += out.loss.item()
             win_micro += 1
             micro += 1
@@ -670,6 +809,12 @@ def main(argv=None) -> int:
     save_generation_config(model, tok, args.out)
     with open(os.path.join(args.out, "train_args.json"), "w") as fh:
         json.dump(vars(args), fh, indent=2)
+    # the run finished, so the directory holds an adapter
+    if _marker and os.path.exists(_marker):
+        try:
+            os.remove(_marker)
+        except OSError:
+            pass
     print(f"saved adapter to {args.out}")
     return 0
 

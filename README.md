@@ -400,6 +400,68 @@ found rather than asserted.
 
 `WORKING_STATE.md` has the measurements and the reasoning for each.
 
+### Run 12 — the trainer's cap was 1,536 and the config said 2,048
+
+Run 11 crashed at the **first optimiser step**, in the backward pass:
+
+```
+RuntimeError: CUDA error: CUBLAS_STATUS_EXECUTION_FAILED when calling
+`cublasSgemm( handle, opa, opb, m, n, k, &alpha, a, lda, b, ldb, &beta, c, ldc)`
+```
+
+Everything before the crash was correct: the right commit, the contract
+check passing, the prompt tables matching the released files, the corpus
+built and the arithmetic clean. The two errors that followed it were both
+*consequences* of the crash, and both looked like something else
+entirely.
+
+**The trainer's banner said `max seq len 1536` while the config said
+2,048.** The Makefile read the config for the base model and nothing
+else; `la.train` never opened `configs/default.yaml` at all and carried
+its own hard-coded `default=1536`. So the config was **inert**, and the
+corpus — measured against 2,048 and written to fit 2,048 — was truncated
+at 1,536. Measured with the model's own tokenizer over 1,500 sampled
+examples: **14.8% of the corpus was cut**, and the cut lands at the end
+of the completion, which is where the answer and the plot spec are. The
+cap is now **2,304**, read from the config, and **0 of 1,500** sampled
+examples is over it.
+
+This is the same lesson as the cap that was never real, one level down: a
+value in a configuration file is not a value the code uses unless the
+code reads it.
+
+**The tokenizer came from the adapter, so a crashed run poisoned every
+later command.** `load_model` did `AutoTokenizer.from_pretrained(adapter
+or base)`. The trainer creates the output directory *before* the training
+loop and writes the adapter into it *at the very end*, so a crashed run
+left an **empty directory** — and the next command died with
+
+```
+ValueError: Couldn't instantiate the backend tokenizer from one of:
+(1) a `tokenizers` library serialization file, ...
+```
+
+which reads like a missing dependency rather than a missing training run.
+The tokenizer is the base model's; the adapter holds weights. It now
+comes from the base, always.
+
+**Worse: the empty directory would have been scored as the base model.**
+The benchmark's adapter guard skipped anything with no `adapter_config.json`
+— which is exactly the empty shell — and fell through to the base model,
+producing a full 660-problem score that would have been reported as the
+fine-tune's. There is now a guard that refuses an adapter directory with
+no adapter in it, and the trainer marks an unfinished run with
+`.incomplete` and removes the mark when it succeeds.
+
+**The GPU fault is now retried instead of fatal.** `CUBLAS_STATUS_EXECUTION_FAILED`
+has two documented causes — the card is out of memory, or the Windows TDR
+watchdog gave up on a long kernel — and neither is a bug in the training
+loop: the same code trained the whole of run 10 on the same card, at the
+same cap, with the same allocator. A run is three and a half hours and
+should not die on a fault that emptying the cache can clear, so the loop
+retries with `torch.cuda.empty_cache()` between attempts, and a batch
+whose retries are exhausted is skipped rather than fatal.
+
 ---
 
 ## Five decisions that shape everything

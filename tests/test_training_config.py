@@ -13,21 +13,13 @@ TRAIN_PY = pathlib.Path(__file__).resolve().parents[1] / "src" / "la" / "train.p
 
 
 def _defaults() -> dict:
-    """The argparse defaults, read out of the source with ast."""
-    tree = ast.parse(TRAIN_PY.read_text(encoding="utf-8"))
-    found = {}
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.Call):
-            continue
-        if getattr(node.func, "attr", "") != "add_argument":
-            continue
-        if not node.args or not isinstance(node.args[0], ast.Constant):
-            continue
-        flag = node.args[0].value
-        for kw in node.keywords:
-            if kw.arg == "default":
-                found[flag] = ast.literal_eval(kw.value)
-    return found
+    """The argparse defaults, read out of the source with ast.
+
+    Most of them are literals and some of them are read from the config
+    file; `la.train_defaults.defaults` resolves both kinds.
+    """
+    from la.train_defaults import defaults
+    return defaults()
 
 
 class TestTrainingDefaults(unittest.TestCase):
@@ -65,8 +57,14 @@ class TestTrainingDefaults(unittest.TestCase):
         # losing the end of their completions, which is where the answer and
         # the plot spec are. The cap has to clear the tail, and make
         # speed-test reports how many examples it is still cutting.
-        self.assertGreaterEqual(self.d["--max-seq-len"], 1024)
-        self.assertLessEqual(self.d["--max-seq-len"], 1536)
+        #
+        # The cap is 2304, measured with the model's own tokenizer over 800
+        # sampled examples: the longest is 2,132 tokens and none is over
+        # 2,204. It was 1536, which cut 15.5 per cent of the corpus - the
+        # trainer's own default was 1536 while the config said 2048, so
+        # the config was inert.
+        self.assertGreaterEqual(self.d["--max-seq-len"], 2304)
+        self.assertLessEqual(self.d["--max-seq-len"], 2304)
 
     def test_the_worst_case_logits_leave_room_on_the_card(self):
         # the logits dominate the memory: a bf16 copy, an fp32 copy for the

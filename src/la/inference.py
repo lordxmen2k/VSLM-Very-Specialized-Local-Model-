@@ -39,7 +39,19 @@ from .parse import extract_json, parse_completion, summarise_answer
 
 def load_model(base: str, adapter: str | None = None, dtype=torch.bfloat16):
     from transformers import AutoModelForCausalLM, AutoTokenizer
-    tok = AutoTokenizer.from_pretrained(adapter or base, trust_remote_code=True)
+    # The tokenizer comes from the BASE, never from the adapter.
+    #
+    # It used to be `adapter or base`, and that turned a crashed training
+    # run into a confusing error. The adapter directory is created before
+    # the training loop and the tokenizer is only written into it at the
+    # very end, so a run that crashed left an empty directory - and every
+    # later command died with
+    #
+    #     ValueError: Couldn't instantiate the backend tokenizer
+    #
+    # which reads like a missing dependency rather than a missing training
+    # run. The tokenizer is the base model's; the adapter holds weights.
+    tok = AutoTokenizer.from_pretrained(base, trust_remote_code=True)
     if tok.pad_token is None:
         tok.pad_token = tok.eos_token
     tok.padding_side = "left"

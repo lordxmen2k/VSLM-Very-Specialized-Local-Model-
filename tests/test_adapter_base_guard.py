@@ -72,8 +72,26 @@ class TestCheckAdapterBase(unittest.TestCase):
             _check_adapter_base("Qwen/Qwen3-1.7B-Base", self.dir)
 
     def test_an_adapter_with_no_record_is_allowed(self):
-        """An adapter from an older run may not carry the record."""
+        """An adapter from an older run may not carry the record.
+
+        The adapter itself has to be there - an empty directory is a
+        training run that did not finish, and it is refused separately.
+        """
+        with open(os.path.join(self.dir, "adapter_model.safetensors"), "w",
+                  encoding="utf-8") as fh:
+            fh.write("")
         _check_adapter_base("Qwen/Qwen3-1.7B-Base", self.dir)
+
+    def test_an_empty_directory_is_refused(self):
+        """An empty directory is a crashed training run, not an adapter.
+
+        It used to be allowed, and then it fell through to the base
+        model: the benchmark produced a full 660-problem score and
+        reported it as the fine-tune's.
+        """
+        with self.assertRaises(SystemExit) as cm:
+            _check_adapter_base("Qwen/Qwen3-1.7B", self.dir)
+        self.assertIn("REFUSING TO RUN", str(cm.exception))
 
     def test_a_missing_adapter_is_allowed(self):
         _check_adapter_base("Qwen/Qwen3-1.7B", os.path.join(self.dir, "nope"))
