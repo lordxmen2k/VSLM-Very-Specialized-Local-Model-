@@ -160,7 +160,15 @@ def score(problems: list[dict], outs: list[str]) -> dict:
         ok = False
         if got:
             try:
-                ok = answers_equal(parse_answer(got),
+                # The model's answer is normalised the way the reference
+                # is. It was not, and that asymmetry cost the run its
+                # score: the benchmark's problem statement gives the model
+                # a label to copy ("Compute A² = A × A"), the model puts
+                # it on its answer, and the label - "A² = " or "det(A) = "
+                # - is untokenisable or misparsed by the answer grammar.
+                # Measured against the released files, 540 of the 660
+                # labelled answers fail to parse without this.
+                ok = answers_equal(parse_answer(normalise_reference(got)),
                                    parse_answer(normalise_reference(p["answer"])),
                                    tol=BENCH_TOL)
             except Exception:

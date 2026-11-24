@@ -52,11 +52,23 @@ def normalise_reference(answer: str) -> str:
 
     The benchmark writes answers like "det(A) = 5" or
     "\\lambda_1 = 1, \\lambda_2 = 2". Only the values are wanted.
+
+    The label has to come off before the answer grammar ever sees it, or
+    every labelled answer scores zero. It is not a cosmetic matter: the
+    released files put a label on 540 of their 660 answers, and the
+    MODEL puts one on its answer too, because the benchmark's own problem
+    statement gives it the label to copy ("Compute A² = A × A",
+    "Find the determinant...").
     """
     a = answer.strip()
     boxes = extract_boxed(a)
     if boxes:
         a = boxes[-1].strip()
+    # The superscript the benchmark's problem statement uses. "A² = ..."
+    # has to become "A^2 = ..." before the label comes off, and before
+    # the lexer sees it: U+00B2 is not in the lexer's name pattern at
+    # all, so the whole answer is untokenisable.
+    a = a.replace("²", "^2").replace("³", "^3")
     # drop a leading label such as "det(A) = " or "x = "
     m = re.match(r"^[^=]{1,24}=\s*(.+)$", a, flags=re.S)
     if m and "=" not in m.group(1):

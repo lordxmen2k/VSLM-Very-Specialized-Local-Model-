@@ -2271,3 +2271,148 @@ fatal: a batch of 20,000 is worth more than one batch of 16.
 rendering, the grader and the released benchmark files are all untouched.
 The corpus itself is **unchanged** — run 12 is about the trainer and the
 benchmark harness, not about the mathematics.
+
+---
+
+## RUN 12 RESULT — 273/660 = 41.4%, and the grader was reading seven of the nine families with one eye shut (2026-11-23)
+
+### The run itself was clean
+
+The right commit ran. The contract check passed, the prompt tables matched
+the released files, the corpus built at 957 problems a second and the
+arithmetic was clean on 3,800 problems. Training ran the full 1,250 steps
+with no GPU fault:
+
+```
+  max seq len        2304
+  step      1/1,250  loss 1.6386 ... vram 5.8/8.5 GB
+  step    1,250/1,250  loss 0.0658 ... 181.9 min
+peak vram: 6.40 GB allocated, 12.10 GB reserved
+saved adapter to runs/vslm-run12
+```
+
+So the cap fix took effect (2,304 in the banner, not 1,536) and the crash
+did not come back.
+
+### The score
+
+**273/660 = 41.4%.** The base model scored **311/660 = 47.1%.**
+
+| | run 10 | run 12 | base |
+|---|---|---|---|
+| overall | 276 = 41.8% | **273 = 41.4%** | 311 = 47.1% |
+| determinant | 1/150 | 7/150 | 60/150 |
+| eigenvalue | 1/30 | 1/30 | 1/30 |
+| matrix_power | 38/60 | 22/60 | 33/60 |
+| matrix_vector | 43/60 | 36/60 | 43/60 |
+| multiplication | 35/60 | 32/60 | 28/60 |
+| nullity | 14/60 | 22/60 | 19/60 |
+| rank | 27/60 | 35/60 | 20/60 |
+| trace | 58/60 | 58/60 | 57/60 |
+| transpose | 59/60 | **60/60** | 50/60 |
+| 3x3 | 113 | 118 | 165 |
+| 4x4 | 106 | 92 | 97 |
+| 5x5 | 57 | **63** | 49 |
+
+loss@200 was 0.0789, against run 10's 0.0774 — the same, and the scores
+are the same, which is what the loss has been good at predicting.
+
+### THE GRADER COULD NOT READ THE BENCHMARK'S OWN ANSWERS
+
+The eval log has the reason, in a single line:
+
+```
+reason: unparseable: cannot tokenise at '² = \begin{bmatrix} '
+```
+
+`bench.score` parses the REFERENCE with
+
+```python
+parse_answer(normalise_reference(p["answer"]))
+```
+
+and the MODEL'S boxed answer with
+
+```python
+parse_answer(got)          # <- no normalisation
+```
+
+`normalise_reference` exists precisely because a benchmark answer is prose
+around a value — `\det(A) = -41`, `A^2 = \begin{bmatrix} ...`, `rank = 3`
+— and the label has to come off before the answer grammar sees it. The
+reference got that treatment and the model's answer did not.
+
+**Measured against the released files, the old path reads 120 of the 660
+reference answers and the new path reads all 660.** Every one of the 660
+released answers carries a label:
+
+| family | the label | old path reads |
+|---|---|---|
+| determinant | `\det(A)` | 0 of 150 |
+| eigenvalue | `\lambda` | 0 of 90 |
+| matrix_power | `A^2` | 0 of 60 |
+| nullity | `\text{nullity}(A)` | 0 of 60 |
+| rank | `\text{rank}(A)` | 0 of 60 |
+| trace | `\text{tr}(A)` | 0 of 60 |
+| transpose | `A^T` | 0 of 60 |
+| matrix_vector | `Ax` | 60 of 60 |
+| multiplication | `AB` | 60 of 60 |
+
+Two forms fail, for two different reasons:
+
+- `A^2 = <matrix>` — **the benchmark's own answer form.** The lexer reads
+  `^` as a bitwise XOR and then fails on the `2`.
+- `A² = <matrix>` — what the model writes, because the benchmark's own
+  PROBLEM STATEMENT says "Compute A² = A × A" and the model copies it.
+  U+00B2 is not in the lexer's name pattern at all.
+
+Both are correct mathematics. Both scored zero.
+
+### WHY THE FINE-TUNE LOST AND THE BASE WON
+
+The base model answers with a bare number in the box, so the grader read
+it. The fine-tune learned the benchmark's answer STYLE and put the label
+on, because the problem statement gave it the label to copy — and the
+grader misread the label.
+
+**The grader punished the fine-tune for matching the benchmark's own
+conventions.** The base model's 128 "no answer parsed" were answers it
+put in prose instead of a box; the fine-tune's 0 unparsed were answers the
+grader read but MISread.
+
+That is why the two families where the fine-tune won big — rank +15 and
+transpose +10 — are the ones where its style happened to survive: its rank
+answer was a bare number and its transpose answer was a bare matrix.
+
+### The fix
+
+`bench.score` now normalises the model's answer the way it normalises the
+reference, and `normalise_reference` maps the superscript the problem
+statement uses onto the caret the answer grammar can read:
+
+```python
+a = a.replace("²", "^2").replace("³", "^3")
+```
+
+`tests/test_the_answer_is_read_like_the_reference.py` pins it, and the
+same normalisation applies to the base model, so the comparison stays
+symmetric.
+
+### What this does NOT change
+
+The corpus. It teaches a bare value with no label — `the answer is -534`
+— which is exactly what `normalise_reference` produces. The corpus was
+never wrong here; the grader was reading the two sides of the comparison
+differently.
+
+### And the remaining real problem
+
+With the label read correctly, the determinant is still the family's weak
+point. The held-out eval showed `determinant 0/13` and `eigenvalue 0/14`,
+and those go through `extract_model_answer`, which ALREADY normalised.
+So those are genuine mathematics failures, not formatting. The Bareiss
+elimination and the computed cofactor minors are in the corpus and the
+model is still not producing them.
+
+**So the label was a real bug worth fixing, and it is not the whole
+story.** The determinant remains the family's problem to solve.

@@ -462,6 +462,57 @@ should not die on a fault that emptying the cache can clear, so the loop
 retries with `torch.cuda.empty_cache()` between attempts, and a batch
 whose retries are exhausted is skipped rather than fatal.
 
+### Run 13 — the grader could not read the benchmark's own answers
+
+Run 12 trained cleanly for the first time in four runs: the right commit,
+the contract check passing, the corpus built, the arithmetic clean, 1,250
+steps with no GPU fault, and `max seq len 2304` in the banner rather than
+1,536.
+
+It scored **273/660 = 41.4%** against the base model's 311/660.
+
+The eval log has the reason in one line:
+
+```
+reason: unparseable: cannot tokenise at '² = \begin{bmatrix} '
+```
+
+**`bench.score` parsed the reference with `normalise_reference` and the
+model's answer without it.** `normalise_reference` exists because a
+benchmark answer is prose around a value — `\det(A) = -41`, `A^2 =
+\begin{bmatrix} ...`, `rank = 3` — and the label has to come off before
+the answer grammar sees it, or every labelled answer scores zero.
+
+Measured against the released files: **the old path reads 120 of the 660
+reference answers; the new path reads all 660.** All 660 carry a label,
+and seven of the nine families' labels the old path could not read at all
+— determinant 0 of 150, eigenvalue 0 of 90, matrix_power 0 of 60, nullity
+0 of 60, rank 0 of 60, trace 0 of 60, transpose 0 of 60.
+
+Two forms fail for two different reasons: `A^2 = <matrix>` is the
+**benchmark's own answer form**, and the lexer reads `^` as a bitwise
+XOR; `A² = <matrix>` is what the model writes, because the benchmark's
+own **problem statement** says "Compute A² = A × A" and the model copies
+it, and U+00B2 is not in the lexer's name pattern at all.
+
+**Why the fine-tune lost and the base won.** The base model answers with a
+bare number in the box, so the grader read it. The fine-tune learned the
+benchmark's answer *style* and put the label on — and the grader misread
+the label. The grader punished the fine-tune for matching the benchmark's
+own conventions.
+
+The corpus is not at fault: it teaches `the answer is -534`, a bare
+value, which is exactly what `normalise_reference` produces.
+
+The fix normalises the model's answer the way it normalises the
+reference, and maps the superscript onto the caret the grammar can read.
+It applies to the base model too, so the comparison stays symmetric.
+
+**And it is not the whole story.** The held-out eval showed
+`determinant 0/13` and `eigenvalue 0/14`, and those already go through a
+path that normalises. Those are genuine mathematics failures, and the
+determinant remains the family's problem to solve.
+
 ---
 
 ## Five decisions that shape everything
