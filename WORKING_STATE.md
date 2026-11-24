@@ -2765,3 +2765,19 @@ batch whose device-side read raises, and they fail against the old code.
 - An ordinary `TypeError` is still NOT retried: it fails loudly.
 - Reverting the fix makes the new tests fail (7 failures, 10 errors).
 
+### THE RULE TO CARRY FORWARD
+
+**A GPU recovery path must not touch the GPU.** While the card is in an unknown
+state, asking it for anything - even a number it gave us a moment ago - is how
+the cure becomes the cause. Compute on the CPU before the transfer, and pass
+the value in.
+
+**A patch must be tested by what it does to a call, not by what its source
+contains.** The old GPU-fault test asserted that `train.py` contained the
+strings `is_gpu_fault(exc)` and `torch.cuda.empty_cache()`. The code contained
+both, and the run still died. The new tests call the recovery path against a
+batch whose device-side read raises.
+
+**One rule, not two that can drift apart.** `la.bench` refused an empty adapter
+directory; `la.evaluate` did not, and handed the directory to PEFT, which went
+to the Hub. Now `la.evaluate` calls the benchmark's own guard.
