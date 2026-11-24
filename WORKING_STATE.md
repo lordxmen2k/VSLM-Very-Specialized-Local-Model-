@@ -2703,3 +2703,65 @@ simply never got the same treatment.
 | determinant (before) | 2.9 | 7/150 |
 | determinant (after) | 12.0 | ? |
 | matrix_power | 14.5 | 22/60 |
+
+---
+
+## RUN 15 — the GPU recovery path asked the GPU for a number
+
+Run 14's training died at step 520 of 1,250, after 92 minutes:
+
+```
+  GPU fault (AcceleratorError); clearing the cache and retrying (attempt 1)
+  ...
+  During handling of the above exception, another exception occurred:
+
+  File "src\la\train.py", line 755, in main
+      win_tok -= int(batch["attention_mask"].sum().item())
+  torch.AcceleratorError: CUDA error: out of memory
+```
+
+### THE DEFECT
+
+The retry machinery was correct. The fault was recognised as a GPU fault
+rather than a bug in the code, the cache was cleared, and the batch was
+about to be run again.
+
+Then the recovery path read the batch's token count back off the GPU.
+`.item()` copies a value off the device, and the device had just run out
+of memory - so the cure for the fault raised the fault again, this time
+OUTSIDE the `try` block that was meant to catch it. The run died on a
+bookkeeping line, at the one moment in the run when the GPU was most
+likely to be in trouble.
+
+The count was only ever used to print a `tok/s` figure.
+
+### THE FIX
+
+- The count is taken on the CPU, before the batch moves to the device.
+- The retry is a function, `run_batch_with_retries`, that takes the count
+  as a parameter rather than reading it.
+- `la.evaluate` now runs the same empty-adapter guard the benchmark runs,
+  before the model is loaded. After run 14 died, `make eval` tried to
+  fetch `runs/vslm-run14` from the Hugging Face Hub and reported a 404
+  that said nothing about what was actually wrong.
+
+### THE LESSON, AND WHY THE OLD TESTS MISSED IT
+
+`test_gpu_fault_is_not_fatal.py` asserted that the source *contained* the
+strings `is_gpu_fault(exc)`, `args.gpu_retries` and
+`torch.cuda.empty_cache()`. The code contained all three and still died.
+
+**A patch must be tested by what it does to a call, not by what its source
+contains.** The old tests could not have caught this: they would have
+passed against the broken code. The new tests call the retry against a
+batch whose device-side read raises, and they fail against the old code.
+
+### THE VERIFICATION
+
+- The retry is exercised without a GPU: a fault is raised, the batch is
+  retried, and the run continues.
+- The recovery path makes NO device read - the test hands it a batch whose
+  `attention_mask` raises if it is summed.
+- An ordinary `TypeError` is still NOT retried: it fails loudly.
+- Reverting the fix makes the new tests fail (7 failures, 10 errors).
+

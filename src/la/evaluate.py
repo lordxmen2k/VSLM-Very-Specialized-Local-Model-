@@ -61,6 +61,13 @@ def main(argv=None) -> int:
     print(f"{len(rows)} held-out problems from {args.data} "
           f"(prompt: {args.prompt_mode})")
 
+    # The same guard the benchmark uses. An adapter directory that holds
+    # no adapter is a training run that did not finish; loading it falls
+    # through to PEFT, which tries to fetch the path from the Hugging
+    # Face Hub and reports a 404 that says nothing about what is wrong.
+    from .bench import _check_adapter_base
+    _check_adapter_base(args.base, args.adapter)
+
     tok, model = load_model(args.base, args.adapter if os.path.isdir(args.adapter) else None)
     t0 = time.time()
     if args.prompt_mode == "training":

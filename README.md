@@ -577,6 +577,65 @@ Verified independently: **278 problems replayed**, the printed triangular
 form is exactly what the Bareiss elimination produces, and the printed
 answer is the determinant — 0 mismatches.
 
+### Run 15 — the recovery path asked the GPU for a number
+
+Run 14 trained for 92 minutes and died at step 520 of 1,250:
+
+```
+  step    520/1,250  loss 0.0650  lr 6.58e-05  ...
+  GPU fault (AcceleratorError); clearing the cache and retrying (attempt 1)
+  ...
+  During handling of the above exception, another exception occurred:
+
+  File "src\la\train.py", line 755, in main
+      win_tok -= int(batch["attention_mask"].sum().item())
+  torch.AcceleratorError: CUDA error: out of memory
+```
+
+The retry machinery was right. The fault was recognised as a GPU fault
+rather than a bug, the cache was cleared, and the batch was about to be
+run again. Then the recovery path read the batch's token count back off
+the GPU:
+
+```python
+win_tok -= int(batch["attention_mask"].sum().item())
+```
+
+`.item()` copies a value off the device — and the device had just run
+out of memory. So the cure for the fault raised the fault again, this
+time **outside** the `try` block that was meant to catch it. A
+three-and-a-half-hour run died on a bookkeeping line, and it died at
+the one moment in the run when the GPU was most likely to be in
+trouble.
+
+The number was only ever used to print a `tok/s` figure. It is now
+counted on the **CPU**, before the batch moves to the device, and the
+recovery path is handed the count rather than reading it.
+
+**Why the old tests did not catch it.** `test_gpu_fault_is_not_fatal.py`
+asserted that the source *contained* the strings `is_gpu_fault(exc)`,
+`args.gpu_retries` and `torch.cuda.empty_cache()`. The code contained
+all three, and still died — because what matters is what the recovery
+path *does* to the device, not what it says. The retry is now a
+function, `run_batch_with_retries`, that can be called without a GPU,
+and the tests call it against a batch whose device-side read raises.
+That test fails against the old code and passes against the new.
+
+**The same run also found a second defect.** After the training died,
+`make eval` was still run, and it tried to load `runs/vslm-run14` as a
+Hugging Face repository:
+
+```
+httpx.HTTPStatusError: Client error '404 Not Found' for url
+'https://huggingface.co/runs/vslm-run14/resolve/main/adapter_config.json'
+```
+
+`la.bench` already refused an empty adapter directory with a clear
+message. `la.evaluate` did not: it checked only that the path was a
+directory, and handed a directory with no adapter in it to PEFT, which
+tried to fetch it from the Hub. `la.evaluate` now runs the same guard
+the benchmark runs, before the model is loaded.
+
 ---
 
 ## Five decisions that shape everything

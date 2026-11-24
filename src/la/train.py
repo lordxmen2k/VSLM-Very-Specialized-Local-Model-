@@ -281,6 +281,62 @@ def save_generation_config(model, tok, out_dir: str) -> None:
         print(f"  could not write the generation config: {exc}")
 
 
+def count_batch_tokens(batch: dict) -> int:
+    """How many real tokens are in this batch.
+
+    Re-exported from `la.train_defaults`, which is where it lives so
+    that it can be tested without importing torch. See that module for
+    why the count must never be read back off the GPU.
+    """
+    from .train_defaults import count_batch_tokens as _count
+    return _count(batch)
+
+
+def run_batch_with_retries(model, batch, grad_accum: int, gpu_retries: int,
+                           optim, on_retry=None):
+    """Run one batch, retrying if the GPU faults.
+
+    Returns `(out, ok)`. `out` is the model's output when the batch
+    succeeded, and `None` when the batch was skipped after the retries
+    ran out. `on_retry` is called with the attempt number after each
+    recovery, which is where the token counter is corrected.
+
+    This is a function rather than a block of inline code so that it
+    can be tested without a GPU. Run 14 died in this code because the
+    recovery path read the batch's token count back off the device:
+
+        win_tok -= int(batch["attention_mask"].sum().item())
+
+    `.item()` copies a value off the GPU, and the GPU had just run out
+    of memory, so the cure for the fault raised the fault again - this
+    time outside the `try` that was meant to catch it. The count is
+    taken on the CPU now, before the batch moves to the device, and it
+    is passed in rather than read here: nothing in the recovery path
+    may touch the device.
+    """
+    attempt = 0
+    while True:
+        try:
+            out = model(**batch)
+            loss = out.loss / grad_accum
+            loss.backward()
+            return out, True
+        except Exception as exc:
+            if not is_gpu_fault(exc):
+                raise
+            attempt += 1
+            if attempt > gpu_retries:
+                print(f"  the GPU fault did not clear after "
+                      f"{gpu_retries} retries; skipping this "
+                      f"batch and carrying on", flush=True)
+                # the graph is gone; the next batch starts clean
+                optim.zero_grad(set_to_none=True)
+                return None, False
+            recover_gpu(exc, attempt)
+            if on_retry is not None:
+                on_retry(attempt)
+
+
 def is_gpu_fault(exc: BaseException) -> bool:
     """Whether an exception is a GPU fault rather than a bug in the code.
 
@@ -726,33 +782,29 @@ def main(argv=None) -> int:
             except StopIteration:
                 break
             data_s += time.time() - t_fetch
+            # The token count is taken from the CPU batch, before the
+            # batch moves to the device. Reading it back off the device
+            # would be a device allocation, and the recovery path below
+            # runs precisely when the device has just run out of memory.
+            batch_tokens = count_batch_tokens(batch)
             batch = {k: v.to(model.device) for k, v in batch.items()}
-            win_tok += int(batch["attention_mask"].sum().item())
+            win_tok += batch_tokens
             # A GPU fault is retried, not fatal. The run is three and a
             # half hours; the fault is a fault in the GPU, not in the
             # model, and it is often clearable by emptying the cache.
-            attempt = 0
-            ok = False
-            while True:
-                try:
-                    out = model(**batch)
-                    loss = out.loss / args.grad_accum
-                    loss.backward()
-                    ok = True
-                    break
-                except Exception as exc:
-                    if not is_gpu_fault(exc):
-                        raise
-                    attempt += 1
-                    if attempt > args.gpu_retries:
-                        print(f"  the GPU fault did not clear after "
-                              f"{args.gpu_retries} retries; skipping this "
-                              f"batch and carrying on", flush=True)
-                        # the graph is gone; the next batch starts clean
-                        optim.zero_grad(set_to_none=True)
-                        break
-                    recover_gpu(exc, attempt)
-                    win_tok -= int(batch["attention_mask"].sum().item())
+            #
+            # The retry is a function so that it can be tested without a
+            # GPU; see `run_batch_with_retries`. It must not read
+            # anything from the device: the card is in an unknown state
+            # when it is called, and asking it for a value is how run 14
+            # died. `batch_tokens` was counted on the CPU.
+            def _correct_the_counter(_attempt, _n=batch_tokens):
+                nonlocal win_tok
+                win_tok -= _n
+
+            out, ok = run_batch_with_retries(
+                model, batch, args.grad_accum, args.gpu_retries, optim,
+                on_retry=_correct_the_counter)
             if not ok:
                 continue
             run_loss += out.loss.item()

@@ -79,3 +79,38 @@ def defaults(path: str | None = None) -> dict:
             except (ValueError, TypeError):
                 found[flag] = _config_default(kw.value)
     return found
+
+
+def count_batch_tokens(batch: dict) -> int:
+    """How many real tokens are in this batch.
+
+    The count is taken on the CPU, before the batch is moved to the
+    device, and never from the device. Run 14 died at step 520 because
+    the GPU-recovery path read this number back off the GPU:
+
+        win_tok -= int(batch["attention_mask"].sum().item())
+
+    `.item()` copies a value off the device, and the device had just
+    run out of memory, so the cure for the fault raised the fault
+    again - outside the `try` that was meant to catch it, which killed a
+    three-and-a-half-hour run.
+
+    The number is only ever used to print a tok/s figure, so it can
+    always be had from the CPU copy, where it costs nothing.
+
+    This lives here rather than in `la.train` so that it can be tested
+    without importing torch: `la.train` imports torch at module level,
+    and a helper that can only be checked on a machine with a 12 GB GPU
+    is a helper that ships untested.
+    """
+    mask = batch.get("attention_mask")
+    if mask is None:
+        return 0
+    if hasattr(mask, "sum"):
+        total = mask.sum()
+    else:
+        # a plain nested list: count the ones
+        total = sum(v for row in mask for v in row)
+    # a tensor has `.item()`; a plain number does not
+    item = getattr(total, "item", None)
+    return int(item() if item is not None else total)
