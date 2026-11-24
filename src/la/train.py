@@ -202,6 +202,14 @@ def build_model(base: str, adapter_out: str | None, rank: int, alpha: int,
     from transformers import AutoModelForCausalLM, AutoTokenizer
     from peft import LoraConfig, get_peft_model
 
+    # Read the checkpoint with `pread` rather than a copy-on-write map. On
+    # Windows a mapped shard is charged to the commit limit for as long as
+    # it is open, so a 3.4 GB checkpoint can fail to load with "the paging
+    # file is too small for this operation to complete" (os error 1455).
+    from .pread import install_pread_backend, report_commit_limit
+    install_pread_backend()
+    report_commit_limit()
+
     tok = AutoTokenizer.from_pretrained(base, trust_remote_code=True)
     if tok.pad_token is None:
         tok.pad_token = tok.eos_token

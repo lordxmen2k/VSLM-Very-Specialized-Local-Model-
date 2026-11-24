@@ -1192,6 +1192,66 @@ VRAM, whether 4-bit quantisation actually works on *this* machine, whether
 the corpus is present, and what nvidia-smi says the GPU is doing right now.
 It is the difference between a dozen lines and a thousand-line traceback.
 
+### "The paging file is too small for this operation to complete" (os error 1455)
+
+This one is Windows, and it is not a corrupt checkpoint.
+
+```
+OSError: The paging file is too small for this operation to complete. (os error 1455)
+  File ".../transformers/modeling_utils.py", line 4444, in _load_pretrained_model
+    file_pointer = safe_open(file, framework="pt", device=device, backend=backend)
+```
+
+`os error 1455` is `ERROR_COMMITMENT_LIMIT`: the machine could not commit
+enough **virtual** memory. It is not a disk error — the checkpoint is on
+`G:` and there is room — and it is not a network error.
+
+**Why it happens.** `safetensors` opens a shard with a copy-on-write
+memory map, and Windows charges the **entire view** to the commit limit
+for as long as the shard is open. The `MapViewOfFile` documentation says
+so outright:
+
+> When copy-on-write access is specified, the system and process commit
+> charge taken is for the entire view
+
+So a 3.4 GB checkpoint costs 3.4 GB of commit for the whole load, on top
+of the RAM, and the commit limit is RAM plus the page file. A machine
+whose page file is small or system-managed runs out — and the error names
+the page file rather than the real cause.
+
+**The fix is already in.** `transformers` 5.17 switched Windows to
+`safetensors`' `pread` backend, which reads each tensor into its own
+buffer and maps nothing, so nothing is charged to commit for the life of
+the file handle. `src/la/pread.py` backports that behaviour to the
+versions before 5.17: it patches `transformers.modeling_utils.safe_open`
+so a CPU shard open defaults to `backend="pread"`.
+
+It is installed automatically by both paths that load a checkpoint, and it
+is a no-op off Windows, on a `safetensors` too old to have the keyword,
+and on a `transformers` that has already been fixed.
+
+**Check the machine before a long run:**
+
+```bash
+make check-memory
+```
+
+```
+  safetensors: reading with pread (safetensors 0.8.0), so the load does
+  not charge the checkpoint to the Windows commit limit
+  commit limit    46.2 GB (RAM 32.0 GB + page file), 3.1 GB free
+  WARNING: under about 6 GB of commit is free. A 3.4 GB checkpoint
+  cannot be mapped here, and the load will die with 'the paging file is
+  too small' (os error 1455). Close what is holding memory, or enlarge
+  the page file.
+```
+
+**If the patch cannot help** — a machine with genuinely too little commit
+— close everything else, or enlarge the page file: *Settings → System →
+About → Advanced system settings → Performance → Settings → Advanced →
+Virtual memory*. Putting it on `G:` is a reasonable choice on this
+machine, since `C:` has about 26 MB free.
+
 ### bitsandbytes will not load
 
 `bitsandbytes` ships pre-compiled binaries for specific CUDA versions. The

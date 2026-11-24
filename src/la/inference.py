@@ -39,6 +39,14 @@ from .parse import extract_json, parse_completion, summarise_answer
 
 def load_model(base: str, adapter: str | None = None, dtype=torch.bfloat16):
     from transformers import AutoModelForCausalLM, AutoTokenizer
+    # Read the checkpoint with `pread` rather than a copy-on-write map.
+    # On Windows a mapped shard is charged to the commit limit for as long
+    # as it is open, and a 3.4 GB checkpoint then fails to load with
+    # "the paging file is too small for this operation to complete"
+    # (os error 1455) - which reads like a corrupt checkpoint and is not.
+    from .pread import install_pread_backend, report_commit_limit
+    install_pread_backend()
+    report_commit_limit()
     # The tokenizer comes from the BASE, never from the adapter.
     #
     # It used to be `adapter or base`, and that turned a crashed training

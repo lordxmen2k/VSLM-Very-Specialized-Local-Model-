@@ -2416,3 +2416,95 @@ model is still not producing them.
 
 **So the label was a real bug worth fixing, and it is not the whole
 story.** The determinant remains the family's problem to solve.
+
+---
+
+## The paging file is too small — and it is not a corrupt checkpoint (2026-11-23)
+
+The re-score of run 12 never started:
+
+```
+OSError: The paging file is too small for this operation to complete. (os error 1455)
+  File ".../transformers/modeling_utils.py", line 4444, in _load_pretrained_model
+    file_pointer = safe_open(file, framework="pt", device=device, backend=backend)
+```
+
+### WHAT IT IS
+
+`os error 1455` is `ERROR_COMMITMENT_LIMIT`. The machine could not commit
+enough **virtual** memory. It is not a disk error — the checkpoint is on
+`G:` with room, and `C:` has about 26 MB free, which is why the HF cache
+lives on `G:` in the first place — and it is not a network error.
+
+### WHY IT HAPPENS
+
+`safetensors` opens a shard with a copy-on-write memory map, and Windows
+charges the **ENTIRE VIEW** to the commit limit for as long as the shard
+is open. The `MapViewOfFile` documentation says so outright:
+
+> When copy-on-write access is specified, the system and process commit
+> charge taken is for the entire view
+
+So a 3.4 GB checkpoint costs 3.4 GB of commit for the whole load, on top
+of the RAM, and the commit limit is RAM plus the page file. A machine
+whose page file is small or system-managed runs out — and the error names
+the page file rather than the real cause.
+
+### IT WAS NOT A REGRESSION
+
+The identical command loaded the same model **four times** in the previous
+session, including a 124-minute generation run:
+
+```
+Loading weights: 100%|...| 311/311 [00:04<00:00,  68.74it/s]
+```
+
+and the run 13 diff is 22 lines, all in the scoring path, nowhere near
+`from_pretrained`.
+
+### THE FIX IS UPSTREAM, AND IT IS BACKPORTED HERE
+
+`transformers` 5.17 switched Windows to `safetensors`' `pread` backend,
+which reads each tensor into its own buffer and maps nothing, so nothing
+is charged to commit for the life of the file handle. `safetensors` has
+had the `backend` keyword since 0.8.
+
+`src/la/pread.py` backports that behaviour to the versions before 5.17. It
+patches `transformers.modeling_utils.safe_open` so a **CPU** shard open
+defaults to `backend="pread"`, and it is installed by both paths that
+load a checkpoint (`la.inference.load_model` and `la.train.build_model`).
+
+It is a no-op off Windows, on a `safetensors` older than 0.8, and on a
+`transformers` that has already been fixed. `make check-memory` prints the
+commit limit from `GlobalMemoryStatusEx` and warns when there is under
+about 6 GB free.
+
+### THE BUG IN MY OWN FIRST ATTEMPT
+
+I checked whether `safetensors` supports the `backend` keyword by looking
+for it in `inspect.signature(safe_open).parameters`. **`safe_open` takes
+`**kwargs`, so `backend` never appears as a named parameter** — the check
+rejected every real installation, and the patch silently never installed,
+on every machine.
+
+**A patch that silently does not install is worse than no patch.** The only
+reliable test is to CALL it:
+
+```python
+_real_safe_open(os.devnull, framework="pt", device="cpu", backend="pread")
+```
+
+`TypeError` means safetensors is too old and the patch must give up; any
+other exception means the keyword was accepted, which is the answer we
+needed.
+
+And the test that catches this class of thing builds a **fake**
+`safetensors` and a **fake** `transformers` in `sys.modules` and asserts
+that the patch really installs and really changes what is passed to the
+open. **A patch must be tested by what it does to a call, not by what its
+source contains.**
+
+### The rule
+
+**A test that asserts on a patch's SOURCE proves the source was written.
+Only a test that exercises the patch proves it works.**

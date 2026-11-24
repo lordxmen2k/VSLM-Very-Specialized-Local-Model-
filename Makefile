@@ -47,13 +47,14 @@ DATA_ARGS ?=
 
 export PYTHONPATH := src
 
-.PHONY: help setup setup-gpu setup-light preflight data sample train eval bench bench-all chat test clean figures contract-check
+.PHONY: help setup setup-gpu setup-light preflight check-memory data sample train eval bench bench-all chat test clean figures contract-check
 
 help:
 	@echo "VSLM"
 	@echo "  make setup-gpu    install a CUDA-matched torch and bitsandbytes (Windows)"
 	@echo "  make setup       install the package and the training stack"
 	@echo "  make preflight   check the GPU, CUDA and bitsandbytes before training"
+	@echo "  make check-memory check the Windows commit limit before a long run"
 	@echo "  make data        build the corpus and the held-out set"
 	@echo "  make sample      render a sample of figures as a sanity check"
 	@echo "  make train       fine-tune with QLoRA"
@@ -77,6 +78,14 @@ setup-light:
 # check the machine before asking it to train
 preflight:
 	$(PYTHON) -m la.preflight
+
+# the commit limit, on its own. A 3.4 GB checkpoint is mapped copy-on-write
+# by default on Windows, and Windows charges the whole view to the commit
+# limit while it is open, so a machine with a small page file fails the
+# load with "the paging file is too small" (os error 1455). This says so
+# before the run rather than after it.
+check-memory:
+	$(PYTHON) -c "from la.pread import install_pread_backend, report_commit_limit; install_pread_backend(); report_commit_limit()"
 
 data:
 	$(PYTHON) -m la.build_dataset --n-train $(N_TRAIN) --n-test $(N_TEST) \
