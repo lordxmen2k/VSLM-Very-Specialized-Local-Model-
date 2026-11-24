@@ -246,6 +246,95 @@ def _minor_arithmetic(minor) -> str:
     return f"{av}*{dv} - {bv}*{cv} = {fmt_scalar(p1)} - {fmt_scalar(p2)}"
 
 
+def _minor_arithmetic_any(minor, depth: int = 1) -> str:
+    """The arithmetic that produces a minor's determinant, at ANY size.
+
+    A 2x2 minor is two products and a subtraction. A 3x3 minor is a
+    cofactor expansion over three 2x2 minors, and a 4x4 minor is four of
+    those. The VERIFY step at 4x4 and 5x5 used to assert those values
+    outright - `det(A) = (+1)*(-2)*(121) + (-1)*(4)*(83) + ...` - so the
+    model was shown a number with no arithmetic behind it, at exactly the
+    sizes where the determinant family was failing.
+
+    The expansion is written with every term visible:
+
+        "(-2)*((-5)*(-4) - (-4)*(-25)) - 4*((-2)*(-4) - (-8)*(-25)) + ..."
+
+    so that the products and the subtraction are all copyable.
+
+    **THE DEPTH IS BOUNDED, AND THAT IS THE POINT.** A 5x5 minor needs a
+    4x4 expansion, which needs four 3x3 expansions, which need twelve
+    2x2 products. Inlining the whole tree made the 5x5 VERIFY step 2,193
+    characters and the whole derivation 3,553 - over the training cap.
+
+    So `depth` limits how far the expansion is written out. At depth 0 the
+    minor's VALUE is used, and at depth 1 the expansion is written one
+    level down with the deeper minors' values. The minors themselves are
+    shown as separate steps with their matrices, so the arithmetic behind
+    each one is visible somewhere - it is just not all on one line.
+    """
+    n = minor.rows
+    if n == 1:
+        return fmt_scalar(minor[0, 0])
+    if n == 2 or depth <= 0:
+        if n == 2:
+            return _minor_arithmetic(minor)
+        return fmt_scalar(_exact(minor.det()))
+    terms = []
+    for j in range(n):
+        sign = 1 if j % 2 == 0 else -1
+        sub = minor.minor_submatrix(0, j)
+        inner = _minor_arithmetic_any(sub, depth=depth - 1)
+        # the inner expansion is already a chain of additions and
+        # subtractions, so it goes in brackets
+        el = fmt_scalar(minor[0, j])
+        if el.startswith("-"):
+            el = f"({el})"
+        piece = f"{el}*({inner})"
+        terms.append(("+" if sign > 0 else "-") + piece)
+    return " ".join(terms)
+
+
+def _minor_value(minor) -> str:
+    """A minor's value, as a plain number."""
+    return fmt_scalar(_exact(minor.det()))
+
+
+def _fmt_bareiss_step(rec: dict) -> str:
+    """One line of the fraction-free elimination, with its arithmetic.
+
+    "R2 <- (4*R2 - (-1)*R1) / 1 = [3, 5, 7]"
+
+    The row operation AND the row it produced. The elimination used to be
+    a black box, and the derivation asserted the triangular form instead
+    of deriving it.
+    """
+    if rec["kind"] == "swap":
+        return (f"interchange R{rec['row']} and R{rec['with']}, so R"
+                f"{rec['row']} = ["
+                + ", ".join(fmt_scalar(v) for v in rec["result"]) + "]")
+
+    pivot = fmt_scalar(rec["pivot"])
+    aik = fmt_scalar(rec["aik"])
+    if aik.startswith("-"):
+        aik = f"({aik})"
+    prev = rec["prev"]
+    div = "" if prev == 1 else f" / {fmt_scalar(prev)}"
+    # the arithmetic of ONE entry, worked out, so the row that follows is
+    # traceable to it
+    e = rec["entries"][0]
+    old = fmt_scalar(e["old"])
+    if old.startswith("-"):
+        old = f"({old})"
+    akj = fmt_scalar(rec["akj"][e["j"]])
+    if akj.startswith("-"):
+        akj = f"({akj})"
+    work = f"({pivot}*{old} - {aik}*{akj}){div}"
+    return (f"R{rec['i']} <- ({pivot}*R{rec['i']} - {aik}*R{rec['k']}){div}"
+            f" = [{', '.join(fmt_scalar(v) for v in rec['after'])}], "
+            f"with {work} = {fmt_scalar(e['new'])}")
+
+
 def _fmt_charpoly(char) -> str:
     """The characteristic polynomial, in LaTeX.
 
@@ -600,7 +689,7 @@ def _row_reduction_steps(A):
     return echelon, steps
 
 
-def _bareiss(A):
+def _bareiss(A, trace: list | None = None):
     """Fraction-free Gaussian elimination (Bareiss).
 
     Returns (upper, swaps) where `upper` is the Bareiss form - the last
@@ -622,6 +711,13 @@ def _bareiss(A):
     problems and 0 of its 660 answers contain one, and all 150 of its
     determinant answers are integers.
 
+    `trace`, if given, collects a record of what each step DID: the
+    row operation and the row it produced. Without it the elimination
+    was a black box, and the derivation asserted the triangular form
+    instead of deriving it - which taught the model to fabricate the
+    form rather than compute it. The determinant scored 7 of 150
+    against the base model's 60 of 150.
+
     Returns None if the matrix is singular, which the caller rejects.
     """
     n = A.rows
@@ -639,12 +735,50 @@ def _bareiss(A):
                 return None, 0
             data[k], data[swap_row] = data[swap_row], data[k]
             swaps += 1
+            if trace is not None:
+                trace.append({
+                    "kind": "swap",
+                    "row": k + 1,
+                    "with": swap_row + 1,
+                    "result": list(data[k]),
+                })
         pivot = data[k][k]
         for i in range(k + 1, n):
-            for j in range(k + 1, n):
-                num = _exact(data[i][j] * pivot - data[i][k] * data[k][j])
-                data[i][j] = _exact(num / prev) if prev != 1 else num
-            data[i][k] = sp.Integer(0)
+            if trace is not None and data[i][k] != 0:
+                # the arithmetic of THIS entry, so the derivation can show
+                # it rather than assert the row that came out
+                aik = data[i][k]
+                akj = data[k]
+                before = list(data[i])
+                entries = []
+                for j in range(k + 1, n):
+                    num = _exact(data[i][j] * pivot - aik * data[k][j])
+                    new = _exact(num / prev) if prev != 1 else num
+                    entries.append({
+                        "j": j,
+                        "old": data[i][j],
+                        "num": num,
+                        "new": new,
+                    })
+                    data[i][j] = new
+                data[i][k] = sp.Integer(0)
+                trace.append({
+                    "kind": "eliminate",
+                    "k": k + 1,
+                    "i": i + 1,
+                    "pivot": pivot,
+                    "prev": prev,
+                    "aik": aik,
+                    "akj": list(akj),
+                    "before": before,
+                    "after": list(data[i]),
+                    "entries": entries,
+                })
+            else:
+                for j in range(k + 1, n):
+                    num = _exact(data[i][j] * pivot - data[i][k] * data[k][j])
+                    data[i][j] = _exact(num / prev) if prev != 1 else num
+                data[i][k] = sp.Integer(0)
         prev = pivot
     if data[n - 1][n - 1] == 0:
         return None, swaps
@@ -1041,7 +1175,24 @@ def gen_determinant(rng: random.Random) -> Problem | None:
         # divides exactly at every step, so every intermediate value is
         # an integer, and the LAST diagonal entry of the Bareiss form is
         # the determinant itself.
-        U, swaps = _bareiss(A)
+        #
+        # AND EVERY STEP IS SHOWN. The derivation used to state the
+        # formula and then assert the triangular form:
+        #
+        #     STEP 1 eliminate below each pivot with the fraction-free form, ...
+        #     STEP 2 the upper triangular form is \begin{bmatrix} -2 & 4 & ...
+        #
+        # which taught the model to FABRICATE the triangular form - to
+        # announce a matrix it never computed. The determinant family
+        # scored 7 of 150 against the base model's 60 of 150, and this
+        # was the largest deficit in the benchmark.
+        #
+        # The pattern that works is already in the corpus: matrix_power
+        # shows every dot product with its products and its partial sums,
+        # and it scores 22/60, while the determinant had 2.9 arithmetic
+        # lines per derivation against matrix_power's 14.5.
+        trace: list = []
+        U, swaps = _bareiss(A, trace=trace)
         if U is None:
             return None
         det_b = _exact(U[n - 1, n - 1])
@@ -1051,6 +1202,8 @@ def gen_determinant(rng: random.Random) -> Problem | None:
                           "form, a_ij <- (a_kk * a_ij - a_ik * a_kj) / "
                           "a_(k-1)(k-1), which divides exactly and keeps "
                           "every intermediate value an integer"))
+        for rec in trace:
+            steps.append(step(_fmt_bareiss_step(rec)))
         steps.append(step("the upper triangular form is " + fmt_matrix(U)
                           + (f", with {swaps} row interchange"
                              f"{'s' if swaps != 1 else ''}" if swaps else "")))
@@ -1097,13 +1250,45 @@ def gen_determinant(rng: random.Random) -> Problem | None:
         #
         # It is also the route the benchmark's 3x3 problems ask for, so
         # the model sees the same arithmetic in both places.
+        #
+        # AND THE MINORS ARE COMPUTED, ONE STEP EACH. The expansion used
+        # to read
+        #
+        #     det(A) = (+1)*(-2)*(121) + (-1)*(4)*(83) + ...
+        #
+        # with the 3x3 and 4x4 minor values ASSERTED - bare numbers with
+        # no arithmetic behind them. Run 11 computed the 2x2 minors at 3x3
+        # and left the larger ones asserted, which is the same defect at a
+        # different size: the model is shown a value it cannot derive, so
+        # it learns to produce one.
+        #
+        # Each minor gets its OWN STEP, with its matrix and its own
+        # arithmetic, exactly as the 3x3 path does. That is the shape
+        # that works: the model sees the arithmetic behind each value
+        # somewhere, rather than a bare number.
+        #
+        # The expansion is only written one level deep. A 5x5 minor needs
+        # a 4x4 expansion, which needs four 3x3 expansions, which need
+        # twelve 2x2 products; inlining the whole tree made the 5x5
+        # VERIFY step 2,193 characters and the derivation 3,553, over the
+        # training cap. The deeper arithmetic is in the minors' own
+        # steps.
         ver_terms = []
         for j in range(n):
             minor = A.minor_submatrix(0, j)
             md = _exact(minor.det())
             sign = 1 if j % 2 == 0 else -1
-            ver_terms.append(f"({sign:+d})*({fmt_scalar(A[0, j])})"
-                             f"*({fmt_scalar(md)})")
+            el = fmt_scalar(A[0, j])
+            if el.startswith("-"):
+                el = f"({el})"
+            # the minor's own step: its matrix and the arithmetic that
+            # produces its value, one level deep
+            steps.append(step(
+                f"VERIFY: the {['first','second','third','fourth','fifth'][j]} "
+                f"minor is {fmt_matrix(minor)} = "
+                f"{_minor_arithmetic_any(minor, depth=1)} = "
+                f"{fmt_scalar(md)}"))
+            ver_terms.append(f"({sign:+d})*({el})*({fmt_scalar(md)})")
         steps.append(step("VERIFY by expanding along the first row: det(A) = "
                           + " + ".join(ver_terms)
                           + f" = {fmt_scalar(det)}, which agrees with the "

@@ -60,18 +60,18 @@ class TestConfigReachesTheTrainer(unittest.TestCase):
             f"the config is inert")
 
     def test_the_configured_cap_clears_the_corpus(self):
-        # 2304, measured with the model's own tokenizer over 800 sampled
-        # examples: the longest is 2,132 tokens (a 5x5 matrix product with
-        # its products shown) and none is over 2,204. A cap of 2048 still
-        # cut 27 of the 800.
+        # 2560, measured with the model's own tokenizer over 3,000
+        # sampled examples: the longest is 2,484 tokens (a 5x5 determinant,
+        # whose elimination shows every row operation) and NONE is over
+        # 2,560. A cap of 2,304 still cut 71 of the 3,000.
         cap = _config()["training"]["max_seq_len"]
-        self.assertGreaterEqual(cap, 2204)
+        self.assertGreaterEqual(cap, 2500)
 
     def test_the_cap_still_leaves_room_on_the_card(self):
         # The logits dominate the memory: a bf16 copy, an fp32 copy for the
         # loss, the log-softmax, and the gradients of all of it, over a
         # vocabulary of 151,936. Measured: about 6 GB per example at 768
-        # tokens. A cap of 2304 needs about 7.2 GB, on a card with 12.88 GB.
+        # tokens. A cap of 2560 needs about 7.5 GB, on a card with 12.88 GB.
         vocab = 151_936
         per_token = vocab * (2 + 4 + 4) / 1e9
         batch = _defaults()["--batch-size"]

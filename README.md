@@ -513,6 +513,70 @@ It applies to the base model too, so the comparison stays symmetric.
 path that normalises. Those are genuine mathematics failures, and the
 determinant remains the family's problem to solve.
 
+### Run 14 — the determinant's elimination was asserted, not computed
+
+Re-scoring run 12 with the fixed grader gave **273/660 = 41.4%** — the
+same number. The base model went 311 → 320, and the fine-tune did not
+move by one problem.
+
+**So the normalisation fix was correct and it was not the fine-tune's
+problem.** The fine-tune's answers were never labelled: the corpus
+teaches a bare value in the box (`the answer is -534`), which always
+parsed. The base model writes `\det(A) = 97` inside its box — it copies
+the benchmark's answer style — and those were the nine the fix
+recovered.
+
+Where the fine-tune actually loses:
+
+| family | fine-tune | base | delta |
+|---|---|---|---|
+| **determinant** | **7/150** | **60/150** | **−53** |
+| matrix_power | 22/60 | 33/60 | −11 |
+| matrix_vector | 36/60 | 43/60 | −7 |
+| rank | 35/60 | 20/60 | +15 |
+| transpose | 60/60 | 56/60 | +4 |
+
+**The determinant alone is 53 of the 74 problems it is behind.** And the
+corpus's determinant derivation is skeletal:
+
+```
+STEP 1 eliminate below each pivot with the fraction-free form,
+      a_ij <- (a_kk * a_ij - a_ik * a_kj) / a_(k-1)(k-1), ...
+STEP 2 the upper triangular form is \begin{bmatrix} -2 & 4 & 2 & 4 \\ ... \end{bmatrix}
+```
+
+**STEP 1 states the formula and performs ZERO arithmetic. STEP 2 asserts
+the triangular form wholesale.** The model is taught to fabricate a
+matrix it never computed — run 9's lesson, unfixed in the determinant.
+The VERIFY step had the same defect: it wrote `det(A) = (+1)*(-2)*(121) +
+(-1)*(4)*(83)`, with the 3×3 minors as bare numbers.
+
+**The arithmetic load per derivation is the diagnostic:**
+
+| family | arithmetic lines | score |
+|---|---|---|
+| determinant, before | **2.9** | 7/150 |
+| matrix_power | **14.5** | 22/60 |
+
+matrix_power does it right — every dot product with its products and
+partial sums — and the determinant simply never got the same treatment.
+
+**It now does.** Every elimination step shows the operation, the row it
+produced, and one entry's arithmetic worked out; every minor is its own
+step with its matrix and its own expansion. The arithmetic load goes
+from 2.9 to **12.0** lines per derivation, in the same range as
+matrix_power's 14.5.
+
+The VERIFY minors are computed one level deep rather than inlined
+whole — a 5×5 minor needs a 4×4 expansion, which needs twelve 2×2
+products, and inlining the tree made that one step 2,193 characters.
+The 5×5 determinant is now 2,484 tokens at its longest, and the cap of
+2,560 truncates none of 3,000 sampled examples.
+
+Verified independently: **278 problems replayed**, the printed triangular
+form is exactly what the Bareiss elimination produces, and the printed
+answer is the determinant — 0 mismatches.
+
 ---
 
 ## Five decisions that shape everything

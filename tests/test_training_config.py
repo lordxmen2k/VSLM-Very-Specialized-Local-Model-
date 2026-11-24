@@ -58,13 +58,13 @@ class TestTrainingDefaults(unittest.TestCase):
         # the plot spec are. The cap has to clear the tail, and make
         # speed-test reports how many examples it is still cutting.
         #
-        # The cap is 2304, measured with the model's own tokenizer over 800
-        # sampled examples: the longest is 2,132 tokens and none is over
-        # 2,204. It was 1536, which cut 15.5 per cent of the corpus - the
-        # trainer's own default was 1536 while the config said 2048, so
-        # the config was inert.
-        self.assertGreaterEqual(self.d["--max-seq-len"], 2304)
-        self.assertLessEqual(self.d["--max-seq-len"], 2304)
+        # The cap is 2560, measured with the model's own tokenizer over
+        # 3,000 sampled examples: the longest is 2,484 tokens and none is
+        # over 2,560. It was 1536, which cut 15.5 per cent of the corpus
+        # - the trainer's own default was 1536 while the config said
+        # 2048, so the config was inert.
+        self.assertGreaterEqual(self.d["--max-seq-len"], 2560)
+        self.assertLessEqual(self.d["--max-seq-len"], 2560)
 
     def test_the_worst_case_logits_leave_room_on_the_card(self):
         # the logits dominate the memory: a bf16 copy, an fp32 copy for the

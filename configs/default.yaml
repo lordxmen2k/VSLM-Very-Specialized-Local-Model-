@@ -47,15 +47,15 @@ training:
   # inert and cut 15.5 per cent of the corpus - and the end of a
   # completion is where the answer and the plot spec are.
   #
-  # 2304, measured with the model's own tokenizer over 800 sampled
-  # examples: the longest is 2,132 tokens (a 5x5 matrix product with its
-  # products shown) and none is over 2,204. A cap of 2,048 would still cut
-  # 27 of the 800.
+  # 2560, measured with the model's own tokenizer over 800 sampled
+  # examples: the longest is 2,456 tokens (a 5x5 determinant, whose
+  # elimination shows every row operation and whose VERIFY shows every
+  # minor) and none is over 2,500.
   #
   # The memory cost is the logits: about 1.5 MB per token over a
-  # vocabulary of 151,936, so this cap needs about 7.2 GB of live tensors,
+  # vocabulary of 151,936, so this cap needs about 7.5 GB of live tensors,
   # against the 12.88 GB the card has.
-  max_seq_len: 2304
+  max_seq_len: 2560
   batch_size: 1
   grad_accum: 16
   optimiser: paged_adamw_8bit

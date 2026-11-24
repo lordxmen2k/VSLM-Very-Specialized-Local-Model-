@@ -2508,3 +2508,198 @@ source contains.**
 
 **A test that asserts on a patch's SOURCE proves the source was written.
 Only a test that exercises the patch proves it works.**
+
+---
+
+## RUN 13 RESULT — 273/660 = 41.4%, unchanged, and the grader was NOT the problem (2026-11-24)
+
+### The re-score ran, and the score did not move
+
+The pread fix worked. The model loaded on the first attempt:
+
+```
+  safetensors: reading with pread (safetensors 0.8.0), so the load does
+  not charge the checkpoint to the Windows commit limit
+  commit limit    83.3 GB (RAM 34.1 GB + page file), 12.9 GB free
+Loading weights: 100%|...| 311/311 [00:04<00:00, 70.39it/s]
+```
+
+**Fine-tune: 273/660 = 41.4%. Exactly the same as before the fix.**
+**Base model: 320/660 = 48.5%, up from 311.**
+
+### WHAT THE FIX ACTUALLY FIXED
+
+The base model went up by 9 (transpose +6, eigenvalue +3, 3x3 +3) and the
+fine-tune did not move **at all** — not one problem changed.
+
+The reason is now clear, and it corrects my run-13 diagnosis:
+
+**THE FINE-TUNE'S ANSWERS WERE NEVER LABELED.** The corpus teaches a bare
+value in the box:
+
+```
+the answer is -534
+```
+
+which parses without any normalisation. So there was nothing for the
+normalisation to fix on the fine-tune's side. The base model, by contrast,
+writes `\\det(A) = 97` inside its box — it copies the benchmark's answer
+style — and those were the nine the fix recovered.
+
+**So the run-13 fix was correct and it was not the fine-tune's problem.**
+The asymmetry I found is real and worth having fixed, but the fine-tune
+was not losing points to it.
+
+### WHERE THE FINE-TUNE ACTUALLY LOSES
+
+| family | fine-tune | base | delta |
+|---|---|---|---|
+| determinant | 7/150 | 60/150 | **-53** |
+| matrix_power | 22/60 | 33/60 | -11 |
+| matrix_vector | 36/60 | 43/60 | -7 |
+| eigenvalue | 1/90 | 4/90 | -3 |
+| rank | 35/60 | 20/60 | +15 |
+| transpose | 60/60 | 56/60 | +4 |
+| multiplication | 32/60 | 28/60 | +4 |
+| nullity | 22/60 | 19/60 | +3 |
+| trace | 58/60 | 57/60 | +1 |
+
+**The determinant alone is 53 of the 74 problems it is behind.**
+
+### WHY THE DETERMINANT FAILS — THE ARITHMETIC LOAD
+
+The corpus's determinant derivation is SKELETAL:
+
+```
+GIVEN: A
+STEP 1 eliminate below each pivot with the fraction-free form,
+      a_ij <- (a_kk * a_ij - a_ik * a_kj) / a_(k-1)(k-1), ...
+STEP 2 the upper triangular form is \begin{bmatrix} -2 & 4 & 2 & 4 \\ 0 & -16 & ... \end{bmatrix}
+STEP 3 the last diagonal entry is -534, so det(A) = -534
+STEP 4 VERIFY by expanding along the first row: det(A) = (+1)*(-2)*(121) + (-1)*(4)*(83) + ...
+STEP 5 VERIFY the determinant of the same matrix is -534. OK
+the answer is -534
+```
+
+**STEP 1 states the formula and performs ZERO arithmetic. STEP 2 asserts
+the triangular form wholesale** — the elimination, with its row operations
+and their results, is missing entirely. And STEP 4's VERIFY uses `(121)`,
+`(83)`, `(50)`, `(15)`: the 3x3 minors are ASSERTED numbers, not computed.
+Run 11 fixed the 2x2 minors and left the larger ones asserted.
+
+**The model is taught to fabricate the triangular form.** It learns to
+announce an answer it never computed.
+
+The arithmetic load per derivation, measured over 30 samples each:
+
+| family | arithmetic lines | run-12 score | base |
+|---|---|---|---|
+| **determinant** | **2.9** | **7/150** | 60/150 |
+| rank | 0.0 | 35/60 | 20/60 |
+| nullity | 1.0 | 22/60 | 19/60 |
+| matrix_vector | 4.9 | 36/60 | 43/60 |
+| matrix_power | **14.5** | 22/60 | 33/60 |
+
+**matrix_power does it right** — every entry's dot product is shown with
+its products and partial sums:
+
+```
+STEP 2 (A^2)_{11} = (-2)*(-2) + 3*3 + (-3)*4 = 4 + 9 - 12 = 1
+```
+
+**So the pattern is known and it works. The determinant simply never got
+the same treatment.** Its elimination is asserted where matrix_power's
+products are computed.
+
+### The rule this confirms
+
+**A derivation must show the terms that produce each value.** The
+determinant asserts its triangular form, so the model asserts one. That
+is run 9's lesson, and run 11 fixed it for the cofactor minors and not
+for the elimination.
+
+**AND THE CONTRACT IS RIGHT.** The corpus matches the benchmark on
+everything that is not the derivation: the entries are |x| <= 9 in both
+(100%), the answers are plain integers in both (150/150 and 400/400), the
+task statement is the benchmark's own, and the answer shape is a bare
+integer. **So this is not a contract failure. It is a derivation
+failure, and it is the same class of defect as every other one this
+project has found.**
+
+---
+
+## RUN 14 — the determinant's elimination is now SHOWN, not asserted (2026-11-24)
+
+### The change
+
+The corpus's determinant derivation used to read:
+
+```
+STEP 1 eliminate below each pivot with the fraction-free form,
+      a_ij <- (a_kk * a_ij - a_ik * a_kj) / a_(k-1)(k-1), ...
+STEP 2 the upper triangular form is \begin{bmatrix} -2 & 4 & 2 & 4 \\ 0 & -16 & ... \end{bmatrix}
+STEP 3 the last diagonal entry is -534, so det(A) = -534
+STEP 4 VERIFY by expanding along the first row: det(A) = (+1)*(-2)*(121) + (-1)*(4)*(83) + ...
+```
+
+**STEP 1 states the formula and performs ZERO arithmetic. STEP 2 asserts
+the triangular form wholesale.** The model was taught to fabricate a
+matrix it never computed.
+
+It now reads:
+
+```
+STEP 2 R2 <- (-2*R2 - 2*R1) = [0, -16, -10, -16], with (-2*4 - 2*4) = -16
+STEP 3 R3 <- (-2*R3 - 5*R1) = [0, -30, 0, -12], with (-2*5 - 5*4) = -30
+STEP 5 R3 <- (-16*R3 - (-30)*R2) / -2 = [0, 0, 150, 144], with (-16*0 - (-30)*(-10)) / -2 = 150
+...
+STEP 14 VERIFY: the first minor is \begin{pmatrix} 1 & 4 & 5 & -4 \\ ... \end{pmatrix}
+      = +1*(-48) -4*(-42) +5*(-74) -(-4)*(-104) = -666
+```
+
+**Every elimination step shows the operation AND the row it produced, with
+one entry's arithmetic worked out. Every minor is its own step, with its
+matrix and its own expansion.**
+
+### THE VERIFY MINORS ARE COMPUTED TOO
+
+The VERIFY step asserted the 3x3 and 4x4 minor values as bare numbers
+(`(121)`, `(83)`). Run 11 fixed the 2x2 minors at 3x3 and left the larger
+ones asserted - the same defect at a different size. They are now
+computed, one level deep, each in its own step.
+
+### THE DEPTH IS BOUNDED, AND THAT WAS A REAL PROBLEM
+
+A 5x5 minor needs a 4x4 expansion, which needs four 3x3 expansions, which
+need twelve 2x2 products. Inlining the whole tree made the 5x5 VERIFY step
+**2,193 characters** and the whole derivation **3,553** - over the cap.
+
+So each minor gets its own step with its expansion written one level deep,
+and the deeper arithmetic lives in the minor's own step rather than all on
+one line. The 5x5 determinant is now 2,484 tokens at its longest.
+
+### THE VERIFICATION
+
+- **278 problems replayed independently**: the printed triangular form is
+  exactly what the Bareiss elimination produces, and the printed answer
+  is the determinant. 0 mismatches.
+- `make check-arithmetic`: 2,850 problems, every printed expression
+  evaluates to the value it claims.
+- The corpus's length in REAL tokens over 3,000 sampled examples: the
+  longest is **2,484** and the cap of **2,560** truncates **none**.
+
+### The rule, restated
+
+**A derivation must show the terms that produce each value.** The
+determinant asserted its triangular form, so the model asserts one. The
+pattern that works was already in the corpus - matrix_power shows every
+dot product with its products and its partial sums - and the determinant
+simply never got the same treatment.
+
+**THE ARITHMETIC LOAD PER DERIVATION IS THE DIAGNOSTIC:**
+
+| family | arithmetic lines | score |
+|---|---|---|
+| determinant (before) | 2.9 | 7/150 |
+| determinant (after) | 12.0 | ? |
+| matrix_power | 14.5 | 22/60 |
