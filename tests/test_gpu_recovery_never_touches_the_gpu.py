@@ -130,7 +130,7 @@ class TestTheRecoveryPathNeverTouchesTheDevice(unittest.TestCase):
     def test_the_token_count_is_taken_before_the_batch_moves_to_the_gpu(self):
         """The count is computed on the CPU, from the CPU batch."""
         lines = self.body.splitlines()
-        moved = [i for i, l in enumerate(lines) if ".to(model.device)" in l]
+        moved = [i for i, l in enumerate(lines) if "move_batch_to_device" in l]
         counted = [i for i, l in enumerate(lines)
                    if "count_batch_tokens(batch)" in l]
         self.assertTrue(moved, "the batch is not moved to the device at all")
@@ -142,7 +142,7 @@ class TestTheRecoveryPathNeverTouchesTheDevice(unittest.TestCase):
     def test_the_count_happens_before_the_transfer(self):
         """The count is taken from the CPU batch, not from the moved one."""
         lines = self.body.splitlines()
-        moved = [i for i, l in enumerate(lines) if ".to(model.device)" in l]
+        moved = [i for i, l in enumerate(lines) if "move_batch_to_device" in l]
         self.assertTrue(moved)
         first_move = moved[0]
         for l in lines[:first_move]:

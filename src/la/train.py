@@ -34,6 +34,40 @@ import time
 # time. This import must come before transformers.
 from . import hf_cache  # noqa: F401
 
+# The CUDA caching allocator must be told not to fragment, and this has to
+# happen BEFORE the first CUDA allocation - before torch allocates anything
+# on the device, and long before the model is built. Setting it afterwards
+# is the same as not setting it.
+#
+# Run 15 reserved 22.4 GB on a 12.88 GB card while its allocated peak was
+# 7.9 GB. The allocator was holding every freed block for the whole three
+# and a half hours so it could hand them out again quickly, and by step 100
+# it could not serve a fresh allocation: the transfer of the next batch died
+# with an out-of-memory error at 221 s/step.
+#
+# `expandable_segments:True` stops the allocator from splitting the device
+# into fixed blocks that fragment; it lets one segment grow. An existing
+# setting is left alone, so the user can override it.
+_ALLOC_CONF_KEY = "PYTORCH_CUDA_ALLOC_CONF"
+_ALLOC_CONF_VALUE = "expandable_segments:True"
+
+
+def configure_allocator() -> str:
+    """Set the CUDA allocator's configuration, before anything is allocated.
+
+    Returns the value in force, whether it was set here or was already
+    there.
+    """
+    existing = os.environ.get(_ALLOC_CONF_KEY, "").strip()
+    if "expandable_segments" in existing:
+        return existing
+    value = f"{existing},{_ALLOC_CONF_VALUE}" if existing else _ALLOC_CONF_VALUE
+    os.environ[_ALLOC_CONF_KEY] = value
+    return value
+
+
+configure_allocator()
+
 import torch
 from torch.utils.data import Dataset, DataLoader
 
@@ -292,6 +326,52 @@ def count_batch_tokens(batch: dict) -> int:
     return _count(batch)
 
 
+def move_batch_to_device(batch: dict, device, optim, gpu_retries: int,
+                         on_move=None):
+    """Move a batch onto the device, retrying if the GPU faults.
+
+    Returns `(batch, ok)`. `batch` is the moved batch when it succeeded
+    and `None` when the batch was skipped after the retries ran out.
+
+    Run 15 died here:
+
+        File "src\\la\\train.py", line 790, in main
+            batch = {k: v.to(model.device) for k, v in batch.items()}
+        torch.AcceleratorError: CUDA error: out of memory
+
+    The transfer sat outside the fault handling, so an out-of-memory
+    fault while moving the batch was fatal. The same rule that fixed the
+    recovery path applies here: **the GPU is in an unknown state, so the
+    code must survive it.** A batch that cannot be moved is a batch to
+    skip, not a run to abandon - the run is three and a half hours and
+    there are 19,999 other batches.
+
+    The memory arithmetic explains why this is worth handling. The
+    logits are the dominant term: one example of L tokens against a
+    vocabulary of 151,936 costs L*151936*4 bytes for the logits and the
+    same again for their gradient, which at the 2,560-token cap is
+    3.11 GB in fp32, for ONE example of batch size 1.
+    """
+    attempt = 0
+    while True:
+        try:
+            return {k: v.to(device) for k, v in batch.items()}, True
+        except Exception as exc:
+            if not is_gpu_fault(exc):
+                raise
+            attempt += 1
+            if attempt > gpu_retries:
+                print(f"  the batch could not be moved to the device after "
+                      f"{gpu_retries} retries; skipping it and carrying on",
+                      flush=True)
+                # the graph is gone; the next batch starts clean
+                optim.zero_grad(set_to_none=True)
+                return None, False
+            recover_gpu(exc, attempt)
+            if on_move is not None:
+                on_move(attempt)
+
+
 def run_batch_with_retries(model, batch, grad_accum: int, gpu_retries: int,
                            optim, on_retry=None):
     """Run one batch, retrying if the GPU faults.
@@ -503,6 +583,20 @@ def speed_test(args, rows, tok, pad_id) -> int:
         print("  until this is zero, and check the memory column below.")
     else:
         print("  truncation: none")
+    # The cap trades truncation against memory, and the trade is a bad one:
+    # the logits dominate, and they scale with the cap, but the cap only
+    # moves a small part of the peak. Run 15 reserved 22.4 GB on a
+    # 12.88 GB card with an allocated peak of 7.9 GB, and lowering the
+    # cap from 2,560 to 2,048 would have saved 0.62 GB of that 7.9 -
+    # while truncating the 5x5 determinant, which is the family the run
+    # most needs. The fragmentation, not the cap, was the problem.
+    if lengths:
+        vocab = 151_936
+        logits_gb = cap * 2 * vocab * 4 / 1e9
+        print(f"  the logits and their gradient cost about {logits_gb:.2f} GB "
+              f"at this cap")
+        print("  (2 * cap * 151936 * 4 bytes, fp32) - that is the term the")
+        print("  cap moves, and it is only part of the peak.")
     card = torch.cuda.get_device_properties(0).total_memory / 1e9 \
         if torch.cuda.is_available() else 0.0
     if torch.cuda.is_available():
@@ -550,11 +644,24 @@ def speed_test(args, rows, tok, pad_id) -> int:
         # without spilling into host memory. Reserved can - on Windows the
         # driver maps host memory into the device address space - so a
         # reserved figure over the card is not by itself a failure.
+        #
+        # But a reserved figure FAR over the card is a warning, and run 15
+        # is why: it reserved 22.4 GB on a 12.88 GB card with an
+        # allocated peak of 7.9 GB, and died at step 100 unable to serve
+        # the fresh allocation the next batch's transfer needed. A large
+        # reserved-minus-allocated gap is the allocator holding blocks it
+        # cannot reuse, and it grows over the run.
+        gap = parsed["resv"] - parsed["alloc"]
         over = "   OVER THE CARD" if card and parsed["alloc"] > card else ""
+        if card and parsed["resv"] > card * 1.5:
+            over += ("   FRAGMENTED: the reservation is over 1.5x the card, so "
+                     "the allocator")
+            over += ("\n           is holding blocks it cannot reuse. The run")
+            over += (" will fail on the first fresh allocation.")
         print(f"  {parsed['bs']:>6}{parsed['ga']:>7}{parsed['eff']:>5}"
               f"{parsed['s_step']:>9.2f}{parsed['tok_s']:>10,.0f}"
               f"{parsed['ex_s']:>8.1f}{parsed['alloc']:>10.2f}"
-              f"{parsed['resv']:>9.2f}{parsed['resv']-parsed['alloc']:>7.2f}"
+              f"{parsed['resv']:>9.2f}{gap:>7.2f}"
               f"{parsed.get('free_start', 0.0):>9.2f}" + over)
 
     print()
@@ -562,10 +669,15 @@ def speed_test(args, rows, tok, pad_id) -> int:
         print(f"  the card has {card:.2f} GB. The limit that matters is the")
         print("  allocated column: live tensors cannot exceed the card without")
         print("  spilling into host memory over PCIe, which on Windows is")
-        print("  several times slower than staying on the card. The reserved")
-        print("  column can exceed the card on its own - the driver maps host")
-        print("  memory into the device address space - so it is not a failure")
-        print("  by itself.")
+        print("  several times slower than staying on the card.")
+        print()
+        print("  The reserved column can exceed the card on its own - the")
+        print("  driver maps host memory into the device address space - so it")
+        print("  is not a failure by itself. But a reserved figure much larger")
+        print("  than the card means the allocator is holding blocks it cannot")
+        print("  reuse, and it will fail on the first fresh allocation. Run 15")
+        print("  died that way: 22.4 GB reserved, 7.9 GB allocated, 12.88 GB")
+        print("  card, dead at step 100 on a transfer that needed a new block.")
     print()
     return 0
 
@@ -787,7 +899,13 @@ def main(argv=None) -> int:
             # would be a device allocation, and the recovery path below
             # runs precisely when the device has just run out of memory.
             batch_tokens = count_batch_tokens(batch)
-            batch = {k: v.to(model.device) for k, v in batch.items()}
+            # The transfer is fault-tolerant for the same reason the
+            # retry is: the GPU is in an unknown state when it fails,
+            # and the run must survive that. Run 15 died here.
+            batch, moved = move_batch_to_device(
+                batch, model.device, optim, args.gpu_retries)
+            if not moved:
+                continue
             win_tok += batch_tokens
             # A GPU fault is retried, not fatal. The run is three and a
             # half hours; the fault is a fault in the GPU, not in the
@@ -818,6 +936,14 @@ def main(argv=None) -> int:
                 g["lr"] = lr
             optim.step()
             optim.zero_grad(set_to_none=True)
+            # The logits and their gradient are the biggest transient
+            # blocks in the run - 3.11 GB at the 2,560-token cap - and
+            # they are freed here. Without this the caching allocator
+            # holds them for the whole three and a half hours, and by
+            # step 100 it cannot serve a fresh allocation: run 15 died
+            # at 22.4 GB reserved on a 12.88 GB card.
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
             step += 1
             now = time.time()
             step_s = now - last_step_t

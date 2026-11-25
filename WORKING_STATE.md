@@ -2781,3 +2781,93 @@ batch whose device-side read raises.
 **One rule, not two that can drift apart.** `la.bench` refused an empty adapter
 directory; `la.evaluate` did not, and handed the directory to PEFT, which went
 to the Hub. Now `la.evaluate` calls the benchmark's own guard.
+
+---
+
+## RUN 16 — the allocator held 22.4 GB on a 12.88 GB card
+
+Run 15 applied the run-14 fix and **the fix worked**: the recovery path
+survived the fault it was written for. Where run 14 died on the first
+fault, run 15 retried three times, skipped the batch, carried on, and
+died at the NEXT place the GPU was asked for something.
+
+```
+  step    100/1,250  loss 0.0949  221.53 s/step  vram 7.9/22.4 GB
+  GPU fault (AcceleratorError); clearing the cache and retrying (attempt 1)
+  ... x3 ...
+  the GPU fault did not clear after 3 retries; skipping this batch and carrying on
+  File "src\la\train.py", line 790, in main
+    batch = {k: v.to(model.device) for k, v in batch.items()}
+torch.AcceleratorError: CUDA error: out of memory
+```
+
+### THE NUMBER THAT EXPLAINS IT
+
+**22.4 GB reserved on a 12.88 GB card.** The allocated peak was 7.9 GB, so
+only 5 GB was live. The rest was PyTorch's caching allocator holding freed
+blocks so it could hand them out again quickly - which by step 100 it could
+not, because it had fragmented.
+
+The step time says the same thing from the other side: **221.53 s/step** at
+step 100, against 9.13 s/step in run 14 at the same step with the same
+corpus and the same cap. That is not more compute. That is memory
+pressure.
+
+The machine was idle, the corpus was byte-identical, and the cap was the
+same, so nothing about the data changed. The allocator's state did.
+
+### THE CAP WAS THE WRONG LEVER
+
+The logits dominate, and they scale with the cap:
+
+| cap | logits + gradient | projected peak | truncation |
+|---|---|---|---|
+| 2,560 | 3.11 GB | 7.90 GB | none |
+| 2,048 | 2.49 GB | 7.28 GB | the 5x5 determinant, by 436 tokens |
+| 1,792 | 2.18 GB | 6.97 GB | the determinant AND matrix_power |
+
+Dropping the cap from 2,560 to 2,048 saves **0.62 GB of a 7.9 GB peak** and
+truncates the 5x5 determinant - the family run 14 changed the derivation
+for. The fragmentation, not the cap, was the problem.
+
+Note also that the working state recorded the logits as "about 1.5 MB per
+token". That is the logits ALONE (0.61 MB per token). With their
+gradient it is 1.22 MB per token, and at the 2,560 cap it is 3.11 GB for
+ONE example of batch size 1.
+
+### THE THREE FIXES, IN ORDER OF HOW MUCH THEY MATTER
+
+1. **`expandable_segments:True`** - one growable segment instead of fixed
+   blocks that fragment. Set at import time, BEFORE torch is imported and
+   before the model is built, because a setting applied after the first
+   CUDA allocation does nothing.
+2. **`empty_cache()` after each optimiser step** - the logits and their
+   gradient are 3.11 GB of transient blocks, freed at every step. Without
+   this the allocator holds them for the whole three and a half hours.
+3. **The device transfer is now fault-tolerant** - `move_batch_to_device`
+   retries, then skips the batch. A batch that cannot be moved is a batch
+   to skip, not a run to abandon.
+
+### THE INSTRUMENT WAS WRONG
+
+The speed test said a reserved figure over the card "is not a failure by
+itself", and run 15's 22.4 GB reservation was read through that sentence
+and dismissed. It now flags a reservation over 1.5x the card as
+fragmented and says what it means.
+
+**A measurement that is dismissed is not a measurement.** The check existed
+and the number was printed; what was missing was the reading of it.
+
+### THE RULES
+
+**The reserved-minus-allocated gap is the diagnostic, not the allocated
+peak.** A big gap is the allocator holding blocks it cannot reuse, and it
+grows until the run cannot serve a fresh allocation.
+
+**A GPU fault anywhere the GPU is asked for something is survivable.** The
+forward pass, the backward pass, AND the transfer. Run 14 died at the
+recovery path's read; run 15 died at the transfer.
+
+**Lowering a limit to fix a fragmentation problem is treating the symptom.**
+Measure the memory term the limit actually moves before spending it.
+

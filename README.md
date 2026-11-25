@@ -636,6 +636,71 @@ directory, and handed a directory with no adapter in it to PEFT, which
 tried to fetch it from the Hub. `la.evaluate` now runs the same guard
 the benchmark runs, before the model is loaded.
 
+### Run 16 — the allocator held 22.4 GB on a 12.88 GB card
+
+Run 15 applied the run-14 fix, and **the fix worked**: the recovery path
+survived the fault it was written for.
+
+```
+  step    100/1,250  loss 0.0949  lr 9.94e-05  221.53 s/step  vram 7.9/22.4 GB
+  GPU fault (AcceleratorError); clearing the cache and retrying (attempt 1)
+  GPU fault (AcceleratorError); clearing the cache and retrying (attempt 2)
+  GPU fault (AcceleratorError); clearing the cache and retrying (attempt 3)
+  the GPU fault did not clear after 3 retries; skipping this batch and carrying on
+Traceback (most recent call last):
+  File "src\la\train.py", line 790, in main
+    batch = {k: v.to(model.device) for k, v in batch.items()}
+torch.AcceleratorError: CUDA error: out of memory
+```
+
+Where run 14 died on the first fault, run 15 retried three times, skipped
+the batch, **carried on**, and died at the next place the GPU was asked
+for something. That is the fix working and then the next defect showing.
+
+**The number that explains it is the reserved one: 22.4 GB reserved on a
+12.88 GB card.** The allocated peak was 7.9 GB, so only 5 GB was live.
+The rest was PyTorch's caching allocator holding freed blocks so it could
+hand them out again quickly — which it could not, because by then the
+allocator had fragmented.
+
+The step time says the same thing from the other side: **221.53 s/step** at
+step 100, against 9.13 s/step in run 14 at the same step with the same
+corpus and the same cap. That is not more compute. That is memory
+pressure.
+
+**The cap was the wrong lever, and the arithmetic says so.** The logits
+dominate the memory, and they scale with the cap:
+
+| cap | logits + gradient | projected peak | truncation |
+|---|---|---|---|
+| 2,560 | 3.11 GB | 7.90 GB | none |
+| 2,048 | 2.49 GB | 7.28 GB | the 5×5 determinant, by 436 tokens |
+| 1,792 | 2.18 GB | 6.97 GB | the determinant *and* matrix_power |
+
+Dropping the cap from 2,560 to 2,048 saves **0.62 GB of a 7.9 GB peak** and
+truncates the 5×5 determinant — the family run 14 changed the derivation
+for. The fragmentation, not the cap, was the problem.
+
+**So the fixes attack the mechanism:**
+
+1. **`expandable_segments:True`** — one growable segment instead of fixed
+   blocks that fragment. Set at import time, before torch allocates
+   anything, because setting it later does nothing.
+2. **`empty_cache()` after each optimiser step** — the logits and their
+   gradient are 3.11 GB of transient blocks, freed at every step, and
+   without this the allocator holds them for the whole three and a half
+   hours.
+3. **The device transfer is now fault-tolerant** — `move_batch_to_device`
+   retries and then skips the batch, so even a transfer that does fail
+   leaves the run alive.
+
+**And the instrument was wrong.** The speed test said a reserved figure
+over the card "is not a failure by itself", and run 15's 22.4 GB
+reservation was read through that sentence and dismissed. It now flags a
+reservation over 1.5× the card as fragmented, and says what it means:
+the allocator is holding blocks it cannot reuse, and the run will fail on
+the first fresh allocation.
+
 ---
 
 ## Five decisions that shape everything
